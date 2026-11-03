@@ -11,6 +11,7 @@ import uuid
 from pathlib import Path
 
 from .download_cache import daily
+from .guest_architecture import architecture
 from .inputs import materialize_readonly_input, sha256
 from .linux_builder import LinuxGuest, install_tools
 
@@ -99,6 +100,7 @@ def prepare(
         "flags": (["-mod=readonly"] if (source / "go.mod").is_file() else [])
         + ["-trimpath"],
         "cgo_enabled": False,
+        "architecture": architecture(),
     }
     key = hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest()
 
@@ -138,7 +140,7 @@ def prepare(
                 ["/run/benchmark/go/bin/go", "version"], version, timeout=15
             )
             compiler = version.read_text().strip()
-            if compiler != "go version " + go["version"] + " linux/arm64":
+            if compiler != "go version " + go["version"] + " linux/" + architecture():
                 raise RuntimeError("Go peer compiler version differs")
             command = (
                 "env GOTOOLCHAIN=local CGO_ENABLED=0 "

@@ -4,6 +4,7 @@ import contextlib
 import hashlib
 import io
 import json
+import os
 import tarfile
 import tempfile
 import unittest
@@ -57,7 +58,8 @@ class SsPluginsTests(unittest.TestCase):
             )
             path = root / "peer/ss-plugins.json"
             config = json.loads(path.read_text())
-            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            if os.name != "nt":
+                self.assertEqual(path.stat().st_mode & 0o777, 0o600)
         self.assertEqual(len(commands), 5)
         self.assertEqual(commands[0]["ready_host"], "10.255.253.1")
         self.assertEqual(config["external-controller"], "10.255.253.1:9091")

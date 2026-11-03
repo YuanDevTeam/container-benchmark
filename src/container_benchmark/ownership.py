@@ -9,6 +9,8 @@ import subprocess
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
 
+from . import container_backend
+
 REGISTRY = ".owned-resources.json"
 PURPOSE = "proxy-core-benchmark"
 IMAGE = re.compile(
@@ -19,13 +21,7 @@ CONTAINER = re.compile(r"benchmark-[0-9a-f]{12}-[A-Za-z0-9._-]+")
 
 
 def _run(*arguments, timeout=30):
-    return subprocess.run(
-        ["container", *arguments],
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        check=True,
-    ).stdout
+    return container_backend.command(*arguments, timeout=timeout)
 
 
 def _validate_work(path):

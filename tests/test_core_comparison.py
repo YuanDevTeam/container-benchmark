@@ -4,6 +4,7 @@ import contextlib
 import hashlib
 import io
 import json
+import sys
 import tempfile
 import unittest
 from copy import deepcopy
@@ -789,10 +790,14 @@ class ComparisonTests(unittest.TestCase):
                 patch.object(
                     comparison, "_geoip_rule_hit_count", side_effect=geoip_hits
                 ),
-                patch.object(
-                    comparison.resource,
-                    "getrusage",
-                    return_value=SimpleNamespace(ru_utime=1.0, ru_stime=0.2),
+                patch.dict(
+                    sys.modules,
+                    resource=SimpleNamespace(
+                        RUSAGE_CHILDREN=-1,
+                        getrusage=Mock(
+                            return_value=SimpleNamespace(ru_utime=1.0, ru_stime=0.2)
+                        ),
+                    ),
                 ),
                 patch.object(native_process, "NativeProcess", side_effect=start),
                 patch.object(comparison.time, "sleep"),
@@ -1175,6 +1180,9 @@ class ComparisonTests(unittest.TestCase):
             tempfile.TemporaryDirectory() as source,
             patch("container_benchmark.pressure_history.PassedWindows") as history,
             patch("container_benchmark.session.Session") as session,
+            patch.object(
+                comparison, "ensure_runtime", side_effect=AssertionError("runtime")
+            ) as runtime,
             contextlib.redirect_stdout(io.StringIO()) as output,
         ):
             history.return_value.contains.return_value = True
@@ -1184,6 +1192,7 @@ class ComparisonTests(unittest.TestCase):
             )
         self.assertEqual(result, 0)
         session.assert_not_called()
+        runtime.assert_not_called()
         self.assertIn("retaining 3 passed windows", output.getvalue())
 
     def test_retest_passed_requires_formal_campaign(self):

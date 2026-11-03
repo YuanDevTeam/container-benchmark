@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from container_benchmark import download_cache, releases
+from container_benchmark import guest_architecture as arch
 from container_benchmark.interop import mihomo_lab
 
 
@@ -91,7 +92,9 @@ class ReleaseCacheTests(unittest.TestCase):
 
     def test_mihomo_clients_and_listeners_copy_the_same_cached_binary(self):
         document = metadata(
-            "MetaCubeX/mihomo", "v99.1.2", "mihomo-linux-arm64-v99.1.2.gz"
+            "MetaCubeX/mihomo",
+            "v99.1.2",
+            f"mihomo-linux-{arch.architecture()}-v99.1.2.gz",
         )
         payload = gzip.compress(b"offline-release-binary")
         url = document["assets"][0]["browser_download_url"]

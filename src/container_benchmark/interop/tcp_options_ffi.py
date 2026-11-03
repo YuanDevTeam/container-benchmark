@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import ctypes
-import fcntl
 import json
 import os
 import socket
@@ -14,6 +13,8 @@ from types import SimpleNamespace
 
 def resources():
     """Observe only Internet sockets and TUN fds; close each observer duplicate."""
+    import fcntl
+
     paths = list(Path("/proc/self/fd").iterdir())
     if len(paths) > 4096:
         raise ValueError("native resource snapshot exceeded its descriptor budget")
@@ -118,6 +119,8 @@ class NativeCore:
         self.native = record["native"] = {"transport": "VoleInvoke/VoleFree"}
 
     def __enter__(self):
+        import fcntl
+
         self.counts_before = (self.runtime.responses, self.runtime.frees)
         self.before = resources()
         self.native["resources_before_start"] = self.before

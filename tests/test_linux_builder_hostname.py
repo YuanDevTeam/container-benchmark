@@ -52,7 +52,7 @@ class LinuxGuestHostnameTests(unittest.TestCase):
         for toolchain in (False, True):
             with self.subTest(toolchain=toolchain):
                 self.hostname = "another-random-container-name"
-                memory_bytes = (16 if toolchain else 8) * 1024**3
+                memory_bytes = (16 if toolchain else 4) * 1024**3
                 self.guest.record = {"cpus": 5, "memory_bytes": memory_bytes}
                 self.commands.clear()
                 linux_builder.install_tools(self.guest, toolchain=toolchain)

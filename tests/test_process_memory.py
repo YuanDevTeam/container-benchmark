@@ -104,6 +104,9 @@ class MemorySnapshotTests(unittest.TestCase):
                 lambda: "drain",
             )
 
+    @unittest.skipUnless(
+        sys.platform == "linux", "Linux directory-fd procfs observations"
+    )
     def test_capture_separates_trigger_actual_memory_and_unknown_thread_roles(self):
         with tempfile.TemporaryDirectory() as directory:
             report = self.capture(self.fixture(directory))
@@ -124,6 +127,9 @@ class MemorySnapshotTests(unittest.TestCase):
             ["tokio-runtime-w\n", "tokio-runtime-w\n"],
         )
 
+    @unittest.skipUnless(
+        sys.platform == "linux", "Linux directory-fd procfs observations"
+    )
     def test_identity_mismatch_skips_or_discards_mapping_attribution(self):
         with tempfile.TemporaryDirectory() as directory:
             root = self.fixture(directory)
@@ -147,6 +153,9 @@ class MemorySnapshotTests(unittest.TestCase):
             self.assertFalse(after["identity_verified_after"])
             self.assertNotIn("mappings", after)
 
+    @unittest.skipUnless(
+        sys.platform == "linux", "Linux directory-fd procfs observations"
+    )
     def test_permission_errors_and_thread_exit_do_not_become_zero(self):
         with tempfile.TemporaryDirectory() as directory:
             root = self.fixture(directory)
@@ -166,6 +175,9 @@ class MemorySnapshotTests(unittest.TestCase):
             self.assertEqual(task["role"], "UNKNOWN")
             self.assertEqual(report["status"], "PARTIAL")
 
+    @unittest.skipUnless(
+        sys.platform == "linux", "Linux directory-fd procfs observations"
+    )
     def test_tid_reuse_is_not_attributed_to_the_original_thread(self):
         with tempfile.TemporaryDirectory() as directory:
             root = self.fixture(directory)
@@ -188,6 +200,9 @@ class MemorySnapshotTests(unittest.TestCase):
         self.assertEqual(report["tasks"][0]["status"], "IDENTITY_CHANGED")
         self.assertEqual(report["tasks"][0]["role"], "UNKNOWN")
 
+    @unittest.skipUnless(
+        sys.platform == "linux", "Linux directory-fd procfs observations"
+    )
     def test_missing_rollup_and_empty_mappings_stay_unavailable(self):
         with tempfile.TemporaryDirectory() as directory:
             root = self.fixture(directory)

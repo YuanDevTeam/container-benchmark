@@ -3,6 +3,7 @@
 import contextlib
 import io
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -134,9 +135,10 @@ class TCPOptionConsumersTests(unittest.TestCase):
                         (root / "peer" / key / name).read_text(),
                         "offline synthetic " + name,
                     )
-                    self.assertEqual(
-                        (root / "peer" / key / name).stat().st_mode & 0o777, 0o600
-                    )
+                    if os.name != "nt":
+                        self.assertEqual(
+                            (root / "peer" / key / name).stat().st_mode & 0o777, 0o600
+                        )
                     field = "certificate" if name == "cert.pem" else "private-key"
                     self.assertEqual(
                         records[key]["listeners"][0][field],

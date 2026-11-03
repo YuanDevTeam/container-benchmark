@@ -1,6 +1,7 @@
 """Protocol key generation belongs to Ubuntu, not the host's LibreSSL."""
 
 import base64
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -18,7 +19,10 @@ class ProtocolPeerTests(unittest.TestCase):
             def execute(argv, log, **kwargs):
                 filename = Path(argv[-1]).name
                 self.assertEqual(argv[0], "openssl")
-                self.assertEqual((root / filename).stat().st_mode & 0o777, 0o600)
+                path = root / filename
+                self.assertEqual(path.read_bytes(), b"")
+                if os.name != "nt":
+                    self.assertEqual(path.stat().st_mode & 0o777, 0o600)
                 if filename.endswith(".der"):
                     (root / filename).write_bytes(
                         b"synthetic DER prefix" + bytes([7]) * 32

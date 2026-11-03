@@ -7,6 +7,7 @@ import re
 import tarfile
 from pathlib import Path
 
+from ..guest_architecture import architecture
 from ..releases import latest_release, release_asset
 from . import mihomo_interop as reference
 from . import security_wrappers
@@ -92,14 +93,14 @@ def node(case, host, pin):
 def _release_asset(repo, name):
     release = latest_release(repo)
     tag = release["release"]
-    prefix = name + "-linux-arm64-" + tag
+    prefix = name + "-linux-" + architecture() + "-" + tag
     assets = [
         a
         for a in release["assets"]
         if a["name"].startswith(prefix) and a["name"].endswith(".tar.gz")
     ]
     if len(assets) != 1:
-        raise ValueError("official plugin ARM64 archive is ambiguous")
+        raise ValueError("official plugin native Linux archive is ambiguous")
     return tag, release_asset(repo, release, assets[0]["name"])
 
 

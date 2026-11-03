@@ -14,11 +14,22 @@ import tempfile
 from pathlib import Path
 
 
+def materialize_input_directory(source: Path, destination: Path) -> None:
+    """Stage frozen inputs without requiring Windows symlink privileges."""
+    source, destination = Path(source).resolve(strict=True), Path(destination)
+    if os.name == "nt":
+        shutil.copytree(source, destination, copy_function=shutil.copyfile)
+    else:
+        destination.symlink_to(
+            Path(os.path.relpath(source, destination.parent)), target_is_directory=True
+        )
+
+
 def materialize_readonly_input(source: Path, destination: Path) -> None:
-    """Keep executable inodes private; share data links where supported."""
+    """Keep executable inodes private; Windows copies without Unix mode bits."""
     source, destination = Path(source).resolve(strict=True), Path(destination)
     mode = source.stat().st_mode
-    copy_required = stat.S_ISREG(mode) and bool(mode & 0o111)
+    copy_required = os.name == "nt" or (stat.S_ISREG(mode) and bool(mode & 0o111))
     with tempfile.TemporaryDirectory(dir=destination.parent) as temporary:
         staged = Path(temporary) / destination.name
         if not copy_required:

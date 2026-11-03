@@ -14,11 +14,13 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from container_benchmark import containers, download_cache, ownership, session
+from container_benchmark import guest_architecture as arch
 from container_benchmark.interop import mihomo_lab
 
 
 class StorageTests(unittest.TestCase):
     def setUp(self):
+        self.enterContext(patch.object(mihomo_lab.container_backend, "ensure_runtime"))
         temporary = self.enterContext(tempfile.TemporaryDirectory())
         self.root = Path(temporary)
         self.enterContext(
@@ -118,7 +120,7 @@ class StorageTests(unittest.TestCase):
 
         with patch.object(mihomo_lab, "CACHE", self.root / "interop"):
             mihomo_lab.daily(
-                "image-ubuntu-26.04-linux-arm64",
+                "image-ubuntu-26.04-linux-" + arch.architecture(),
                 lambda _: {"tag": containers.IMAGE, "digest": digest},
             )
             with (
@@ -149,7 +151,7 @@ class StorageTests(unittest.TestCase):
                 patch.object(mihomo_lab, "CACHE", Path(directory) / "interop"),
             ):
                 mihomo_lab.daily(
-                    "image-ubuntu-26.04-linux-arm64",
+                    "image-ubuntu-26.04-linux-" + arch.architecture(),
                     lambda _: {"tag": containers.IMAGE, "digest": digest},
                 )
                 calls = []
@@ -266,7 +268,8 @@ class StorageTests(unittest.TestCase):
             self.assertIn("scratch cleanup pending", saved[-1])
             for directory in read_only:
                 self.assertTrue(directory.stat().st_mode & stat.S_IWUSR)
-            self.assertEqual(stat.S_IMODE(external.stat().st_mode), 0o555)
+            if os.name != "nt":
+                self.assertEqual(stat.S_IMODE(external.stat().st_mode), 0o555)
             self.assertEqual(
                 stat.S_IMODE((external / "source.go").stat().st_mode), 0o444
             )
@@ -295,7 +298,8 @@ class StorageTests(unittest.TestCase):
         self.assertEqual(len(saved), 1)
         self.assertFalse(run.work.exists())
         self.assertEqual((external / "source.go").read_text(), "outside owned scratch")
-        self.assertEqual(stat.S_IMODE(external.stat().st_mode), 0o555)
+        if os.name != "nt":
+            self.assertEqual(stat.S_IMODE(external.stat().st_mode), 0o555)
         self.assertIn("Cleanup: complete", run.report.read_text())
         self.assertEqual(sys.dont_write_bytecode, previous_bytecode)
         self.assertEqual({name: os.environ.get(name) for name in previous}, previous)

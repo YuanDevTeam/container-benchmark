@@ -21,6 +21,7 @@ import threading
 import time
 from pathlib import Path
 
+from .guest_architecture import architecture
 from .inputs import save, sha256
 from .paths import BENCHMARK_ROOT, FIXTURE_ROOT
 
@@ -217,6 +218,10 @@ def module_action(action, state_path, expected=None):
 
 @contextlib.contextmanager
 def module_context(guest, *, enabled=True, label="tcp-brutal"):
+    if architecture() != "arm64":
+        raise RuntimeError(
+            "TCP option fixtures require the verified ARM64 guest kernel and module"
+        )
     if not re.fullmatch(r"[a-z0-9-]{1,48}", label):
         raise ValueError("unsafe TCP module ownership label")
     expected = sha256(MODULE_PATH) if enabled else ""

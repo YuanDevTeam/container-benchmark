@@ -16,6 +16,7 @@ import time
 from pathlib import Path
 
 from container_benchmark import core_vole_adapter
+from container_benchmark.guest_architecture import elf_machine
 from container_benchmark.inputs import save, sha256, source_identity
 from container_benchmark.interop import mihomo_lab as lab
 from container_benchmark.interop.h3_pressure import validate_tun_result
@@ -218,8 +219,11 @@ def run(source, binary, output):
         raise ValueError("private gate lib-test size differs")
     with binary.open("rb") as stream:
         header = stream.read(20)
-    if header[:6] != b"\x7fELF\x02\x01" or header[18:20] != b"\xb7\x00":
-        raise ValueError("private gate requires Linux AArch64 ELF64")
+    if (
+        header[:6] != b"\x7fELF\x02\x01"
+        or int.from_bytes(header[18:20], "little") != elf_machine()
+    ):
+        raise ValueError("private gate requires a native Linux ELF64")
     helper = Path(__file__).resolve(strict=True)
     before = {
         "core": source_identity(source),

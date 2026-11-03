@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import tarfile
 
+from ..guest_architecture import architecture, machine_name
 from ..releases import latest_release, release_asset
 from .mihomo_lab import download, sha256
 from .native_peer_releases import MAX_BINARY, MAX_DOWNLOAD, _check_binary, _copy_cached
@@ -15,11 +16,11 @@ PASSWORD = "synthetic-interop-password"
 
 
 def official_trusttunnel(root):
-    """Retain only the endpoint from the latest stable official ARM64 package."""
+    """Retain only the endpoint from the latest stable official native Linux package."""
 
     resolved = latest_release(REPOSITORY)
     release = resolved["release"]
-    package_name = f"trusttunnel-{release}-linux-aarch64"
+    package_name = f"trusttunnel-{release}-linux-{machine_name()}"
     url = release_asset(REPOSITORY, resolved, package_name + ".tar.gz")
 
     def prepare(staging):
@@ -55,7 +56,7 @@ def official_trusttunnel(root):
             "peer": "TrustTunnel",
             "release": release,
             "url": url,
-            "architecture": "linux-arm64",
+            "architecture": "linux-" + architecture(),
             "archive_sha256": archive_sha,
             "binary_sha256": sha256(binary),
         }
@@ -64,7 +65,7 @@ def official_trusttunnel(root):
         root,
         "trusttunnel",
         prepare,
-        cache_key="trusttunnel-official-release-linux-arm64",
+        cache_key="trusttunnel-official-release",
         release=release,
     )
 

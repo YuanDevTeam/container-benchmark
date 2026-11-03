@@ -1,4 +1,4 @@
-"""Official Mihomo Linux ARM64 binary used by the native-TUN comparison."""
+"""Official Mihomo native Linux binary used by the native-TUN comparison."""
 
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ import urllib.request
 from pathlib import Path
 
 from .download_cache import daily
+from .guest_architecture import architecture
 
 MAX_ARCHIVE_BYTES = 128 * 1024**2
 MAX_BINARY_BYTES = 256 * 1024**2
@@ -120,9 +121,9 @@ def prepare_binary(directory):
     repository = "MetaCubeX/mihomo"
     resolved = latest_release(repository)
     release = resolved["release"]
-    asset = f"mihomo-linux-arm64-{release}.gz"
+    asset = f"mihomo-linux-{architecture()}-{release}.gz"
     url = release_asset(repository, resolved, asset)
-    key = f"mihomo-linux-arm64-{release}"
+    key = f"mihomo-linux-{architecture()}-{release}"
 
     def prepare(staging):
         archive, binary = staging / asset, staging / "mihomo"

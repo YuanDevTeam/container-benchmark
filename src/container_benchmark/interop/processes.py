@@ -12,6 +12,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from ..processes import KILL_SIGNAL, process_group_options, signal_process_group
+
 SERVER_LOG_LIMIT = 10 * 1024**2
 
 
@@ -47,11 +49,11 @@ class OwnedProcess:
                 self.command,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
-                start_new_session=os.name != "nt",
                 stdin=subprocess.DEVNULL if self.stdin is None else self.stdin,
                 env=self.env,
                 cwd=self.cwd,
                 pass_fds=self.pass_fds,
+                **process_group_options(),
             )
         except BaseException:
             self.log.close()
@@ -79,7 +81,7 @@ class OwnedProcess:
                         continue
                     self.record["output_overflow"] = True
                     self.overflow.set()
-                    self._signal(signal.SIGKILL)
+                    self._signal(KILL_SIGNAL)
         except OSError as error:
             self.record["output_capture_error"] = type(error).__name__
             self.overflow.set()
@@ -87,16 +89,7 @@ class OwnedProcess:
             self.process.stdout.close()
 
     def _signal(self, value):
-        try:
-            if os.name == "nt":
-                if value == signal.SIGKILL:
-                    self.process.kill()
-                else:
-                    self.process.terminate()
-            else:
-                os.killpg(self.process.pid, value)
-        except ProcessLookupError:
-            pass
+        signal_process_group(self.process, value)
 
     def _terminate(self):
         if self.process.poll() is None:
@@ -104,14 +97,14 @@ class OwnedProcess:
             try:
                 self.process.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                self._signal(signal.SIGKILL)
+                self._signal(KILL_SIGNAL)
                 self.process.wait(timeout=5)
 
     def _finish_reader(self):
         if self.reader is not None:
             self.reader.join(timeout=5)
             if self.reader.is_alive():
-                self._signal(signal.SIGKILL)
+                self._signal(KILL_SIGNAL)
                 self.reader.join(timeout=5)
             if self.reader.is_alive():
                 raise RuntimeError("owned output reader did not stop")

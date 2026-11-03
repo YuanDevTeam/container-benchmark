@@ -7,13 +7,14 @@ import json
 import tarfile
 from pathlib import Path
 
+from ..guest_architecture import architecture, musl_target
 from ..releases import latest_release, release_asset
 from .mihomo_lab import download, sha256
 from .native_peer_releases import MAX_BINARY, MAX_DOWNLOAD, _check_binary, _copy_cached
 from .xray_interop import cases as xray_cases
 
 REPOSITORY = "shadowsocks/shadowsocks-rust"
-TARGET = "aarch64-unknown-linux-musl"
+TARGET = musl_target()
 
 
 def _extract_server(archive, binary):
@@ -42,7 +43,7 @@ def _extract_server(archive, binary):
 
 
 def official_release(root):
-    """Cache official ARM64 musl ssserver; native version runs only in a guest."""
+    """Cache official native Linux musl ssserver; execute its version in a guest."""
 
     resolved = latest_release(REPOSITORY)
     release = resolved["release"]
@@ -59,7 +60,7 @@ def official_release(root):
             "peer": "shadowsocks-rust",
             "release": release,
             "url": url,
-            "architecture": "linux-arm64",
+            "architecture": "linux-" + architecture(),
             "target": TARGET,
             "archive_sha256": archive_sha,
             "binary_sha256": sha256(binary),
@@ -69,7 +70,7 @@ def official_release(root):
         root,
         "ssserver",
         prepare,
-        cache_key="shadowsocks-rust-official-release-linux-arm64",
+        cache_key="shadowsocks-rust-official-release",
         release=release,
     )
 

@@ -19,9 +19,9 @@
 
 ## 固定环境与输入
 
-- Apple Silicon macOS 与 Apple 官方 `container`；全部自有 guest 使用官方 `docker.io/library/ubuntu:26.04`，每会话冻结 digest 并读回 `VERSION_ID`。
-- 专用编译容器为 5 CPU／16 GiB；客户端、协议服务端、原站与负载容器为 5 CPU／8 GiB。builder 停止并清理后才启动负载。
-- guest 在启动 Core／对端前固定并核验 `hostname=benchmark`；默认内核为 ARM64 `7.3.0-vole-kata430`，MPTCP 与匹配签名的 TCP Brutal 模块按所选场景使用。
+- Apple Silicon macOS 使用 Apple 官方 `container`；Windows 使用 `wslc`，guest 架构匹配宿主原生 AMD64／ARM64。全部自有 guest 使用官方 `docker.io/library/ubuntu:26.04`，每会话冻结对应架构的 digest 并读回 `VERSION_ID`。Windows 前提与能力边界见 [Windows / wslc](docs/windows-wslc.md)。
+- 专用编译容器为 5 CPU／16 GiB；客户端、协议服务端、原站与负载容器为 5 CPU／4 GiB。builder 停止并清理后才启动负载。
+- guest 在启动 Core／对端前固定并核验 `hostname=benchmark`；Apple ARM64 环境的默认内核为 `7.3.0-vole-kata430`，Windows 记录实际 WSL session 内核。MPTCP 与匹配签名的 TCP Brutal 模块按所选场景独立验收，不能跨内核或平台复用通过证明。
 - 当前默认 1Gbps，每窗 60 秒，分别运行 TCP、UDP、mixed。2Gbps 和显式 3Gbps 专项单独选择，不加入当前默认矩阵。
 - 默认 64 条业务流，每个 UDP 源 socket 轮换 64 个目的端口；单目标例外以窗口输入为准。1Gbps 是全部流、上下行与两条 CN 分支的合计应用载荷供给。
 - 额外叠加 1000 QPS 唯一名称 DNS；命中／未命中 CN 分支各承担一半业务。DNS 不计入业务带宽，保持 DIRECT。

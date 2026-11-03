@@ -20,7 +20,9 @@ class ProcessesTest(unittest.TestCase):
 
     def test_capture_and_join_use_only_the_explicit_work_directory(self):
         result = self.run_python("print('ready')", timeout=3)
-        self.assertEqual((result.returncode, result.stdout), (0, b"ready\n"))
+        self.assertEqual(
+            (result.returncode, result.stdout.splitlines()), (0, [b"ready"])
+        )
         self.assertTrue(result.cleanup)
 
     def test_timeout_and_output_limit_join_owned_children(self):
@@ -32,6 +34,9 @@ class ProcessesTest(unittest.TestCase):
         self.assertEqual(len(overflow.stdout), 64)
         self.assertTrue(overflow.cleanup)
 
+    @unittest.skipIf(
+        os.name == "nt", "Linux guest descriptor inheritance is POSIX-only"
+    )
     def test_inherited_fd_remains_owned_by_the_caller(self):
         reader, writer = os.pipe()
         try:

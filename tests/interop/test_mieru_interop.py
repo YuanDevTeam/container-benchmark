@@ -4,6 +4,7 @@ import base64
 import contextlib
 import io
 import json
+import os
 import tarfile
 import tempfile
 import unittest
@@ -12,6 +13,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from container_benchmark import download_cache
+from container_benchmark import guest_architecture as arch
 from container_benchmark.cli import main
 from container_benchmark.interop import mieru_interop as mieru
 from container_benchmark.interop import mihomo_interop as interop
@@ -82,7 +84,8 @@ class MieruInteropTests(unittest.TestCase):
             )
             path = root / "peer/config.json"
             config = json.loads(path.read_text())
-            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            if os.name != "nt":
+                self.assertEqual(path.stat().st_mode & 0o777, 0o600)
             self.assertTrue(config["ipv6"])
             self.assertEqual(config["external-controller"], "127.0.0.1:9091")
             self.assertEqual(config["rules"], ["MATCH,DIRECT"])
@@ -144,7 +147,8 @@ class MieruInteropTests(unittest.TestCase):
             commands = mieru.configure(selected, root)
             path = root / "peer/mita.json"
             config = json.loads(path.read_text())
-            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            if os.name != "nt":
+                self.assertEqual(path.stat().st_mode & 0o777, 0o600)
         self.assertEqual(config["listenIPAddress"], "0.0.0.0")
         self.assertEqual(
             config["portBindings"],
@@ -221,7 +225,8 @@ class MieruInteropTests(unittest.TestCase):
                 name = case["id"]
                 path = root / "peer" / (name + ".json")
                 settings = json.loads(path.read_text())
-                self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+                if os.name != "nt":
+                    self.assertEqual(path.stat().st_mode & 0o777, 0o600)
                 self.assertEqual(settings["trafficPattern"], mieru.traffic_pattern())
                 self.assertEqual(
                     settings["portBindings"],
@@ -458,7 +463,7 @@ class MieruInteropTests(unittest.TestCase):
             self.assertEqual(f["witnesses"][24812]["status"], "FAIL_WITNESS")
 
     def test_official_package_retains_only_mita_and_freezes_the_release_url(self):
-        name = "mita_3.38.1_linux_arm64.tar.gz"
+        name = f"mita_3.38.1_linux_{arch.architecture()}.tar.gz"
         resolved = {
             "release": "v3.38.1",
             "repository": mieru.REPOSITORY,
@@ -474,7 +479,7 @@ class MieruInteropTests(unittest.TestCase):
             self.assertEqual(
                 url,
                 "https://github.com/enfein/mieru/releases/download/"
-                "v3.38.1/mita_3.38.1_linux_arm64.tar.gz",
+                f"v3.38.1/mita_3.38.1_linux_{arch.architecture()}.tar.gz",
             )
             with tarfile.open(path, "w:gz") as archive:
                 for name, data in (("../not-extracted", b"ignored"), ("mita", elf())):

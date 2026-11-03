@@ -2,6 +2,7 @@
 
 import io
 import json
+import os
 import stat
 import struct
 import tarfile
@@ -13,6 +14,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from container_benchmark import download_cache
+from container_benchmark import guest_architecture as arch
 from container_benchmark.interop import extended_interop as extended
 
 from .test_native_peer_releases import release_record
@@ -60,7 +62,8 @@ class ExtendedInteropTests(unittest.TestCase):
             )
             config = json.loads(path.read_text())
             self.assertEqual(path.name, "v2ray.json")
-            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            if os.name != "nt":
+                self.assertEqual(path.stat().st_mode & 0o777, 0o600)
         self.assertEqual(len(config["inbounds"]), 9)
         self.assertEqual(config["outbounds"], [{"protocol": "freedom"}])
         for case, inbound in zip(selected, config["inbounds"], strict=True):
@@ -172,16 +175,23 @@ class ExtendedInteropTests(unittest.TestCase):
             startup = extended.configure(selected, root, "192.0.2.5", "a" * 64, guest)
             config = json.loads(startup["config_path"].read_text())
             xray = json.loads((root / "peer/caddy-xray.json").read_text())
-            self.assertEqual(
-                (root / "peer/mtls-client.key").stat().st_mode & 0o777, 0o600
-            )
-            self.assertEqual((root / "peer/mtls-ca.key").stat().st_mode & 0o777, 0o600)
-            self.assertEqual(
-                (root / "peer/mtls-untrusted-ca.key").stat().st_mode & 0o777, 0o600
-            )
-            self.assertEqual(
-                (root / "peer/mtls-untrusted-client.key").stat().st_mode & 0o777, 0o600
-            )
+            if os.name != "nt":
+                self.assertEqual(
+                    (root / "peer/mtls-client.key").stat().st_mode & 0o777, 0o600
+                )
+            if os.name != "nt":
+                self.assertEqual(
+                    (root / "peer/mtls-ca.key").stat().st_mode & 0o777, 0o600
+                )
+            if os.name != "nt":
+                self.assertEqual(
+                    (root / "peer/mtls-untrusted-ca.key").stat().st_mode & 0o777, 0o600
+                )
+            if os.name != "nt":
+                self.assertEqual(
+                    (root / "peer/mtls-untrusted-client.key").stat().st_mode & 0o777,
+                    0o600,
+                )
             signing = [
                 call.args[0]
                 for call in guest.execute.call_args_list
@@ -281,16 +291,18 @@ class ExtendedInteropTests(unittest.TestCase):
     def test_official_downloads_use_resolved_tags_and_reuse_cached_content(self):
         header = bytearray(64)
         header[:7] = b"\x7fELF\x02\x01\x01"
-        struct.pack_into("<HH", header, 16, 2, 183)
+        struct.pack_into("<HH", header, 16, 2, arch.elf_machine())
         binary = bytes(header) + b"offline-official-binary"
         records = {
             extended.V2RAY_REPOSITORY: release_record(
-                extended.V2RAY_REPOSITORY, "v99.1.2", ["v2ray-linux-arm64-v8a.zip"]
+                extended.V2RAY_REPOSITORY,
+                "v99.1.2",
+                [f"v2ray-linux-{arch.v2ray_arch()}.zip"],
             ),
             extended.CADDY_REPOSITORY: release_record(
                 extended.CADDY_REPOSITORY,
                 "v99.1.2",
-                ["caddy_99.1.2_linux_arm64.tar.gz"],
+                [f"caddy_99.1.2_linux_{arch.architecture()}.tar.gz"],
             ),
         }
         with tempfile.TemporaryDirectory() as directory:
@@ -344,7 +356,7 @@ class ExtendedInteropTests(unittest.TestCase):
                             return_value=release_record(
                                 extended.V2RAY_REPOSITORY,
                                 "v99.1.2",
-                                ["v2ray-linux-arm64-v8a.zip"],
+                                [f"v2ray-linux-{arch.v2ray_arch()}.zip"],
                             ),
                         ),
                         patch.object(extended, "download", side_effect=download),
@@ -356,7 +368,7 @@ class ExtendedInteropTests(unittest.TestCase):
     def test_caddy_extracts_only_one_bounded_regular_root_binary(self):
         header = bytearray(64)
         header[:7] = b"\x7fELF\x02\x01\x01"
-        struct.pack_into("<HH", header, 16, 2, 183)
+        struct.pack_into("<HH", header, 16, 2, arch.elf_machine())
         binary = bytes(header) + b"offline-official-binary"
         for variant in (
             "missing",
@@ -407,7 +419,7 @@ class ExtendedInteropTests(unittest.TestCase):
                         return_value=release_record(
                             extended.CADDY_REPOSITORY,
                             "v99.1.2",
-                            ["caddy_99.1.2_linux_arm64.tar.gz"],
+                            [f"caddy_99.1.2_linux_{arch.architecture()}.tar.gz"],
                         ),
                     ),
                     self.assertRaises(ValueError),

@@ -64,6 +64,11 @@ class H3TunWorkload(unittest.TestCase):
             with (
                 self.subTest(failed=failed),
                 patch("container_benchmark.tun_workload.os.open", side_effect=(10, 11)),
+                patch(
+                    "container_benchmark.tun_workload.os.O_CLOEXEC",
+                    0x80000,
+                    create=True,
+                ),
                 patch("container_benchmark.tun_workload.os.close"),
                 patch(
                     "container_benchmark.tun_workload.socket.socket", side_effect=create

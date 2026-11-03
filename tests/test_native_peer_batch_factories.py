@@ -1,6 +1,7 @@
 """Offline native endpoint allocation; no guest, key generator or network runs."""
 
 import json
+import os
 import tempfile
 import unittest
 from copy import deepcopy
@@ -92,7 +93,10 @@ class NativePeerBatchFactoryTests(unittest.TestCase):
                 self.assertEqual(node["ip"], endpoint["client_ip"])
                 self.assertEqual(commands[0]["udp_ports"], [port])
                 self.assertLessEqual(len(endpoint["device"]), 15)
-                self.assertEqual((path / "peer/wg-key").stat().st_mode & 0o777, 0o600)
+                key_path = path / "peer/wg-key"
+                self.assertEqual(key_path.read_text(), material["PrivateKey"] + "\n")
+                if os.name != "nt":
+                    self.assertEqual(key_path.stat().st_mode & 0o777, 0o600)
                 endpoints.append(endpoint)
             self.assertNotEqual(endpoints[0]["device"], endpoints[1]["device"])
             self.assertTrue(

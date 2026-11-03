@@ -1,6 +1,7 @@
 """Offline native HY2 fixture contracts; never start network services."""
 
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -51,7 +52,8 @@ class Hysteria2InteropTests(unittest.TestCase):
             )
             path = root / "peer/config.json"
             config = json.loads(path.read_text())
-            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            if os.name != "nt":
+                self.assertEqual(path.stat().st_mode & 0o777, 0o600)
             self.assertEqual(config["external-controller"], "127.0.0.1:9091")
             self.assertEqual(config["rules"], ["MATCH,DIRECT"])
             self.assertEqual(len(config["listeners"]), 2)

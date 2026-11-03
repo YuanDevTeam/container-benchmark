@@ -23,6 +23,7 @@ import tempfile
 from pathlib import Path
 
 from ..download_cache import daily as shared_daily
+from ..guest_architecture import architecture
 from ..releases import latest_release, release_asset
 from . import config_apply as apply
 from . import controller_streams as controller
@@ -40,7 +41,7 @@ def official_age(root):
     repo = "FiloSottile/age"
     resolved = latest_release(repo)
     tag = resolved["release"]
-    name = "age-" + tag + "-linux-arm64.tar.gz"
+    name = "age-" + tag + f"-linux-{architecture()}.tar.gz"
     url = release_asset(repo, resolved, name)
     asset = next(item for item in resolved["assets"] if item["name"] == name)
     digest = asset.get("digest", "")
@@ -74,7 +75,7 @@ def official_age(root):
         }
 
     return shared_daily(
-        "age-cli-linux-arm64-" + tag,
+        "age-cli-linux-" + architecture() + "-" + tag,
         prepare,
         directory=root / "artifacts",
         immutable=True,

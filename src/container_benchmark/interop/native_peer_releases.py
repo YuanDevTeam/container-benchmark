@@ -1,4 +1,4 @@
-"""Official latest ARM64 native peers for cases absent from Mihomo listeners."""
+"""Official latest native Linux peers for cases absent from Mihomo listeners."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import zipfile
 from pathlib import Path
 
 from ..download_cache import daily as shared_daily
+from ..guest_architecture import architecture, elf_machine, v2ray_arch
 from ..releases import latest_release, release_asset
 from .mihomo_lab import download, sha256
 
@@ -25,9 +26,11 @@ def _check_binary(path):
         or len(header) != 64
         or header[:7] != b"\x7fELF\x02\x01\x01"
         or int.from_bytes(header[16:18], "little") not in (2, 3)
-        or int.from_bytes(header[18:20], "little") != 183
+        or int.from_bytes(header[18:20], "little") != elf_machine()
     ):
-        raise ValueError("official native peer is not a bounded Linux ARM64 ELF binary")
+        raise ValueError(
+            f"official native peer is not a bounded Linux {architecture()} ELF binary"
+        )
 
 
 def _extract_xray(archive, binary):
@@ -59,7 +62,7 @@ def _extract_xray(archive, binary):
 
 
 def _copy_cached(root, name, prepare, *, release, cache_key=None):
-    key = (cache_key or name + "-linux-arm64") + "-" + release
+    key = (cache_key or name) + "-linux-" + architecture() + "-" + release
     # Pressure peers link this directory to their owning group's artifacts.
     artifacts = (Path(root) / "artifacts").resolve()
     artifacts.mkdir(exist_ok=True)
@@ -74,7 +77,7 @@ def official_xray(root):
     """Copy latest official Xray to root/artifacts/xray; version runs in guest."""
 
     resolved = latest_release(XRAY_REPOSITORY)
-    url = release_asset(XRAY_REPOSITORY, resolved, "Xray-linux-arm64-v8a.zip")
+    url = release_asset(XRAY_REPOSITORY, resolved, f"Xray-linux-{v2ray_arch()}.zip")
 
     def prepare(staging):
         archive, binary = staging / "xray.zip", staging / "xray"
@@ -86,7 +89,7 @@ def official_xray(root):
             "peer": "Xray-core",
             "url": url,
             "release": resolved["release"],
-            "architecture": "linux-arm64",
+            "architecture": "linux-" + architecture(),
             "archive_sha256": archive_sha,
             "binary_sha256": sha256(binary),
         }
@@ -98,7 +101,9 @@ def official_hysteria2(root):
     """Copy latest official Hysteria to root/artifacts/hysteria2; no host exec."""
 
     resolved = latest_release(HYSTERIA2_REPOSITORY)
-    url = release_asset(HYSTERIA2_REPOSITORY, resolved, "hysteria-linux-arm64")
+    url = release_asset(
+        HYSTERIA2_REPOSITORY, resolved, "hysteria-linux-" + architecture()
+    )
 
     def prepare(staging):
         binary = staging / "hysteria2"
@@ -109,7 +114,7 @@ def official_hysteria2(root):
             "peer": "Hysteria2",
             "url": url,
             "release": resolved["release"],
-            "architecture": "linux-arm64",
+            "architecture": "linux-" + architecture(),
             "archive_sha256": checksum,
             "binary_sha256": checksum,
         }

@@ -6,6 +6,7 @@ import hashlib
 import io
 import json
 import os
+import shutil
 import signal
 import tempfile
 import unittest
@@ -14,6 +15,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from container_benchmark import download_cache
+from container_benchmark import guest_architecture as arch
 from container_benchmark.cli import main
 from container_benchmark.interop import masque_interop as masque
 from container_benchmark.interop import mihomo_interop as interop
@@ -59,9 +61,9 @@ class MasqueInteropTests(unittest.TestCase):
                 "files": [
                     {
                         "os": "linux",
-                        "arch": "arm64",
+                        "arch": arch.architecture(),
                         "kind": "archive",
-                        "filename": "go1.27.2.linux-arm64.tar.gz",
+                        "filename": f"go1.27.2.linux-{arch.architecture()}.tar.gz",
                         "sha256": checksum,
                     }
                 ],
@@ -111,9 +113,12 @@ class MasqueInteropTests(unittest.TestCase):
             )
             self.assertEqual(
                 downloaded.call_args.args[0],
-                "https://go.dev/dl/go1.27.2.linux-arm64.tar.gz",
+                f"https://go.dev/dl/go1.27.2.linux-{arch.architecture()}.tar.gz",
             )
 
+    @unittest.skipUnless(
+        shutil.which("openssl"), "requires the host OpenSSL executable"
+    )
     def test_real_synthetic_ec_keys_feed_private_l4_and_owned_ip_configs(
         self,
     ):
@@ -165,7 +170,8 @@ class MasqueInteropTests(unittest.TestCase):
                 root / "peer/masque-client-key.der",
                 root / "peer/masque-server.pem",
             ):
-                self.assertEqual(private.stat().st_mode & 0o777, 0o600)
+                if os.name != "nt":
+                    self.assertEqual(private.stat().st_mode & 0o777, 0o600)
             ip_root = root / "cases" / selected[1]["id"]
             ip_root.mkdir(parents=True)
             path = interop.configure_client(
@@ -457,6 +463,7 @@ class MasqueInteropTests(unittest.TestCase):
                 patch.object(masque.os, "pidfd_open", return_value=7, create=True),
                 patch.object(masque.os, "close") as closed,
                 patch.object(masque.signal, "pidfd_send_signal", create=True) as sent,
+                patch.object(masque.signal, "SIGUSR1", 10, create=True),
             ):
                 if stat == valid_stat and command == valid_command and image:
                     masque._signal_owned_session(identity)

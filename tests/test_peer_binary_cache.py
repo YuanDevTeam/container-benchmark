@@ -13,6 +13,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from container_benchmark import download_cache, ownership, wireguard_peer
+from container_benchmark import guest_architecture as arch
 from container_benchmark import peer_binary_cache as cache
 from container_benchmark.container_resources import BUILDER_MEMORY_BYTES, allocation
 from container_benchmark.inputs import sha256
@@ -24,7 +25,7 @@ def elf():
     header = bytearray(64)
     header[:7] = b"\x7fELF\x02\x01\x01"
     header[16:18] = (2).to_bytes(2, "little")
-    header[18:20] = (183).to_bytes(2, "little")
+    header[18:20] = arch.elf_machine().to_bytes(2, "little")
     return bytes(header)
 
 
@@ -62,7 +63,7 @@ class PeerBinaryCacheTests(unittest.TestCase):
 
             def execute(self, argv, log, **_kwargs):
                 if argv[-1] == "version":
-                    log.write_text("go version go1.27.2 linux/arm64\n")
+                    log.write_text(f"go version go1.27.2 linux/{arch.architecture()}\n")
                 elif argv[:2] == ["/bin/sh", "-ec"]:
                     owner.events.append("build")
                     owner.assertIn("GOTOOLCHAIN=local CGO_ENABLED=0", argv[2])
@@ -384,9 +385,10 @@ class PeerBinaryCacheTests(unittest.TestCase):
                             "files": [
                                 {
                                     "os": "linux",
-                                    "arch": "arm64",
+                                    "arch": arch.architecture(),
                                     "kind": "archive",
-                                    "filename": version + ".linux-arm64.tar.gz",
+                                    "filename": version
+                                    + f".linux-{arch.architecture()}.tar.gz",
                                     "sha256": hashlib.sha256(
                                         archive_bytes()
                                     ).hexdigest(),

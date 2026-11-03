@@ -11,6 +11,7 @@ from types import ModuleType, SimpleNamespace
 from unittest.mock import Mock, patch
 
 from container_benchmark import core_vole_adapter as vole
+from container_benchmark import guest_architecture as arch
 from container_benchmark import linux_builder
 
 
@@ -129,7 +130,7 @@ class VoleAdapterTest(unittest.TestCase):
         (root / "artifacts").mkdir()
         header = bytearray(20)
         header[:6] = b"\x7fELF\x02\x01"
-        header[18:20] = (183).to_bytes(2, "little")
+        header[18:20] = arch.elf_machine().to_bytes(2, "little")
         identity = b"Vole;engine=rust;coreVersion=0.1.0"
         (root / "artifacts/vole").write_bytes(header + identity)
         (root / "vole-version.log").write_text("Vole 0.1.0\n" + identity.decode())
@@ -159,7 +160,7 @@ class VoleAdapterTest(unittest.TestCase):
         self.assertEqual(identity["library_name"], "libvole.rlib")
         self.assertEqual(identity["features"], ["cli"])
         self.assertEqual(identity["library_format"], "rlib")
-        self.assertEqual(identity["binary_format"], "ELF64 little-endian aarch64")
+        self.assertEqual(identity["binary_format"], arch.binary_format())
         self.assertEqual(
             identity["build_identity"], "Vole;engine=rust;coreVersion=0.1.0"
         )
@@ -176,8 +177,12 @@ class VoleAdapterTest(unittest.TestCase):
         root, guest = self.prepare_build()
         binary = root / "artifacts/vole"
         original = binary.read_bytes()
-        binary.write_bytes(original[:18] + (62).to_bytes(2, "little") + original[20:])
-        with self.assertRaisesRegex(ValueError, "native Linux arm64 ELF"):
+        binary.write_bytes(
+            original[:18]
+            + (183 if arch.elf_machine() == 62 else 62).to_bytes(2, "little")
+            + original[20:]
+        )
+        with self.assertRaisesRegex(ValueError, "native Linux .* ELF"):
             vole.build(guest, root)
         binary.write_bytes(original)
         (root / "vole-version.log").write_text("Vole 0.2.0")
@@ -208,13 +213,14 @@ class VoleAdapterTest(unittest.TestCase):
         )
         self.assertNotIn("features", identity)
         self.assertNotIn("library_sha256", identity)
-        self.assertEqual((root / "artifacts/vole").stat().st_mode & 0o777, 0o755)
+        if os.name != "nt":
+            self.assertEqual((root / "artifacts/vole").stat().st_mode & 0o777, 0o755)
 
     def test_explicit_cli_cannot_bypass_native_elf_check(self):
         root, guest = self.prepare_build()
         selected = self.root / "selected-cli"
         selected.write_bytes(b"not a native CLI")
-        with self.assertRaisesRegex(ValueError, "native Linux arm64 ELF"):
+        with self.assertRaisesRegex(ValueError, "native Linux .* ELF"):
             vole.use_binary(guest, root, selected)
 
     def test_guest_prepares_source_dependencies_for_the_same_normal_cargo_build(self):
@@ -224,7 +230,7 @@ class VoleAdapterTest(unittest.TestCase):
         cache = self.root / "native cache"
         scope = root / "vole-native.env"
         scope.write_text("STALE=discarded\n")
-        suffix = "_AARCH64_UNKNOWN_LINUX_GNU"
+        suffix = "_" + arch.rust_target().upper().replace("-", "_")
         include, library = str(cache / "include"), str(cache / "lib")
         events = []
 
@@ -313,6 +319,17 @@ class VoleAdapterTest(unittest.TestCase):
                 return json.dumps(inspection)
             if action == "exec" and args[-2:] == ("/bin/uname", "-r"):
                 return "7.3.0-test"
+            if action == "exec" and args[-2:] == ("/bin/uname", "-m"):
+                return arch.machine_name()
+            if action == "exec" and args[-1] == "/sys/class/net/eth0/mtu":
+                return "1500"
+            if action == "exec" and args[1:3] == ("/bin/sh", "-ec"):
+                return json.dumps(
+                    {
+                        "before": {"all": 1, "default": 1},
+                        "after": {"all": 0, "default": 0},
+                    }
+                )
             if action == "exec":
                 return 'ID=ubuntu\nPRETTY_NAME="Ubuntu 26.04.1 LTS"\nVERSION_ID=26.04\n'
             return ""
@@ -342,13 +359,13 @@ class VoleAdapterTest(unittest.TestCase):
                     arguments,
                 )
             executed.reset_mock()
-            inspection[0]["configuration"]["resources"]["memoryInBytes"] = 8 * 1024**3
+            inspection[0]["configuration"]["resources"]["memoryInBytes"] = 4 * 1024**3
             with linux_builder.LinuxGuest(
                 self.root / "runtime", "ubuntu", network="default"
             ):
                 arguments = executed.call_args_list[0].args
                 self.assertEqual(arguments[arguments.index("--cpus") + 1], "5")
-                self.assertEqual(arguments[arguments.index("--memory") + 1], "8G")
+                self.assertEqual(arguments[arguments.index("--memory") + 1], "4G")
                 self.assertFalse(
                     any(
                         linux_builder.NATIVE_CACHE_PATH in str(arg) for arg in arguments
@@ -362,7 +379,7 @@ class VoleAdapterTest(unittest.TestCase):
                 network="default",
             ):
                 arguments = executed.call_args_list[0].args
-                self.assertEqual(arguments[arguments.index("--memory") + 1], "8G")
+                self.assertEqual(arguments[arguments.index("--memory") + 1], "4G")
                 self.assertIn(
                     f"type=bind,source={source.resolve()},target=/src/cores/vole,readonly",
                     arguments,

@@ -1,11 +1,11 @@
-"""Self-contained official downloads and owned Apple-container interop resources."""
+"""Official downloads and owned native Linux interop resources."""
 
 from __future__ import annotations
 
 import hashlib
 import json
 import os
-import platform
+import platform as platform
 import re
 import shutil
 import subprocess
@@ -18,8 +18,11 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
+from .. import container_backend
 from ..container_resources import CPUS, allocation
 from ..containers import IMAGE, ubuntu_identity
+from ..containers import command as container_command
+from ..guest_architecture import architecture, machine_name, rust_target
 from ..paths import BENCHMARK_ROOT, FIXTURE_ROOT
 from .processes import run_command
 
@@ -28,7 +31,7 @@ SCRATCH = BENCHMARK_ROOT / ".work/interop"
 CONCLUSIONS = BENCHMARK_ROOT / "conclusions/interop"
 NETWORK = "benchmark-interop-nat"
 PURPOSE = "container-benchmark-interop"
-TARGET = "aarch64-unknown-linux-gnu"
+TARGET = rust_target()
 PACKAGES = (
     "build-essential",
     "git",
@@ -71,10 +74,7 @@ def sha256(path):
 
 
 def command(*arguments, timeout=60):
-    result = run_command(["container", *map(str, arguments)], timeout=timeout)
-    if result.returncode or not result.cleanup:
-        raise RuntimeError(f"owned container operation failed: {arguments[0]}")
-    return result.stdout.decode()
+    return container_command(*arguments, timeout=timeout)
 
 
 def download(url, path, *, limit=768 * 1024**2):
@@ -192,7 +192,7 @@ def official_rust():
             "installer_files": installer_files,
         }
 
-    return daily("rust", prepare)
+    return daily("rust-" + TARGET, prepare)
 
 
 def owned_network():
@@ -324,7 +324,7 @@ class Guest:
             f"{NETWORK},mtu=1500",
             *self.resource_arguments,
             "--arch",
-            "arm64",
+            architecture(),
             *[
                 argument
                 for item in self.capabilities
@@ -377,16 +377,42 @@ class Guest:
         self.ipv6 = row["status"]["networks"][0].get("ipv6Address", "").split("/")[0]
         release = command("exec", self.name, "/bin/cat", "/etc/os-release")
         self.record.update(ubuntu_identity(release))
+        machine = command("exec", self.name, "/bin/uname", "-m").strip()
+        if machine != machine_name():
+            raise RuntimeError(
+                "owned interop guest architecture differs from the native host"
+            )
+        kernel = command("exec", self.name, "/bin/uname", "-r").strip()
+        if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,255}", kernel) is None:
+            raise RuntimeError("owned interop guest kernel release was not observed")
+        if platform.system() == "Windows":
+            observed_mtu = command(
+                "exec", self.name, "/bin/cat", "/sys/class/net/eth0/mtu"
+            ).strip()
+            if not observed_mtu.isdecimal() or int(observed_mtu) != 1500:
+                raise RuntimeError("owned interop guest MTU differs from 1500")
+            self.record["mtu"] = int(observed_mtu)
         self.record.update(
+            architecture=architecture(),
+            machine=machine,
+            kernel_release=kernel,
             cpus=resources["cpus"],
             memory_bytes=resources["memoryInBytes"],
             network="NAT",
         )
+        if "SYS_ADMIN" in self.capabilities:
+            namespace = container_backend.prepare_tun_namespace(
+                self.name, execute=command
+            )
+            if namespace is not None:
+                self.record["tun_namespace"] = namespace
         return self
 
     def execute(self, argv, log, *, timeout=1800):
         result = run_command(
-            ["container", "exec", self.name, *map(str, argv)],
+            container_backend.run_argv(
+                ["container", "exec", self.name, *map(str, argv)]
+            ),
             timeout=timeout,
             limit=4 * 1024**2,
         )
@@ -453,6 +479,7 @@ class Guest:
 
 
 def prepare_tools(session, *, extra_packages=()):
+    container_backend.ensure_runtime()
     selected_packages = tuple(dict.fromkeys((*PACKAGES, *extra_packages)))
 
     def image_refresh(_):
@@ -465,7 +492,9 @@ def prepare_tools(session, *, extra_packages=()):
         return {"tag": IMAGE, "digest": digest}
 
     print("Protocol interop dependencies: official Ubuntu 26.04 LTS image", flush=True)
-    _, image_identity = daily("image-ubuntu-26.04-linux-arm64", image_refresh)
+    _, image_identity = daily(
+        "image-ubuntu-26.04-linux-" + architecture(), image_refresh
+    )
     if image_identity.get("tag") != IMAGE:
         raise RuntimeError("cached interop image differs from Ubuntu 26.04")
     image = IMAGE.rsplit(":", 1)[0] + "@" + image_identity["digest"]
@@ -501,7 +530,13 @@ def prepare_tools(session, *, extra_packages=()):
         :12
     ]
     packages_path, packages_identity = daily(
-        "packages-" + image_identity["digest"][-12:] + "-" + package_set, packages
+        "packages-"
+        + architecture()
+        + "-"
+        + image_identity["digest"][-12:]
+        + "-"
+        + package_set,
+        packages,
     )
     print("Protocol interop dependencies: official Rust stable archive", flush=True)
     rust_path, rust_identity = official_rust()
@@ -559,10 +594,9 @@ class Session:
         )
 
     def __enter__(self):
-        if platform.system() != "Darwin" or platform.machine() != "arm64":
-            raise RuntimeError(
-                "Protocol interop currently requires Apple Silicon and Apple container"
-            )
+        container_backend.ensure_host()
+        if self.source_dir is not None:
+            container_backend.ensure_runtime()
         SCRATCH.mkdir(parents=True, exist_ok=True)
         if SCRATCH.is_symlink() or SCRATCH.parent.is_symlink():
             raise ValueError("interop scratch must not use a symlink")

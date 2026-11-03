@@ -11,6 +11,38 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+KILL_SIGNAL = getattr(signal, "SIGKILL", 9)
+
+
+def process_group_options():
+    """Keep the owned CLI child separate from the host's console group."""
+    if os.name == "nt":
+        return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+    return {"start_new_session": True}
+
+
+def signal_process_group(process, number):
+    """Terminate our CLI child on Windows; POSIX owns the whole process group."""
+    try:
+        if os.name == "nt":
+            if number == KILL_SIGNAL:
+                process.kill()
+            else:
+                process.terminate()
+        else:
+            os.killpg(process.pid, number)
+    except ProcessLookupError:
+        pass
+    except PermissionError:
+        # Darwin can report EPERM for a zombie-only group. Reap only our
+        # child, then require that its process group really no longer exists.
+        if os.name != "nt" and process.poll() is not None:
+            try:
+                os.killpg(process.pid, 0)
+            except ProcessLookupError:
+                return
+        raise
+
 
 class OwnedProcess:
     def __init__(
@@ -32,9 +64,9 @@ class OwnedProcess:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 stdin=subprocess.DEVNULL,
-                start_new_session=True,
                 env=self.env,
                 cwd=self.cwd,
+                **process_group_options(),
             )
         except BaseException:
             self.log.close()
@@ -55,26 +87,14 @@ class OwnedProcess:
                 stored += min(len(chunk), remaining)
                 if len(chunk) > remaining:
                     self.overflow.set()
-                    self._signal(signal.SIGKILL)
+                    self._signal(KILL_SIGNAL)
         except OSError:
             self.overflow.set()
         finally:
             self.process.stdout.close()
 
     def _signal(self, number):
-        try:
-            os.killpg(self.process.pid, number)
-        except ProcessLookupError:
-            pass
-        except PermissionError:
-            # Darwin can report EPERM for a zombie-only group. Reap only our
-            # child, then require that its process group really no longer exists.
-            if self.process.poll() is not None:
-                try:
-                    os.killpg(self.process.pid, 0)
-                except ProcessLookupError:
-                    return
-            raise
+        signal_process_group(self.process, number)
 
     def ensure_alive(self):
         if self.overflow.is_set():
@@ -95,11 +115,11 @@ class OwnedProcess:
                 try:
                     self.process.wait(timeout=self._remaining(5, 0.25))
                 except subprocess.TimeoutExpired:
-                    self._signal(signal.SIGKILL)
+                    self._signal(KILL_SIGNAL)
                     self.process.wait(timeout=self._remaining(5, 0.5))
             self.reader.join(timeout=self._remaining(5, 0.5))
             if self.reader.is_alive():
-                self._signal(signal.SIGKILL)
+                self._signal(KILL_SIGNAL)
                 self.reader.join(timeout=self._remaining(5))
             if self.reader.is_alive():
                 raise RuntimeError("owned output reader did not stop")

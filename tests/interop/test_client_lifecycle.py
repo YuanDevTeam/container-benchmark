@@ -2,6 +2,7 @@
 
 import importlib.util
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path, PurePosixPath
@@ -222,7 +223,8 @@ class ClientLifecycleTests(unittest.TestCase):
             material = directory / "data/regex-provider.json"
             self.assertEqual(provider["path"], str(material))
             self.assertTrue(material.is_relative_to(directory / "data"))
-            self.assertEqual(material.stat().st_mode & 0o777, 0o600)
+            if os.name != "nt":
+                self.assertEqual(material.stat().st_mode & 0o777, 0o600)
             payload = json.loads(material.read_text())["proxies"]
             self.assertEqual(
                 [node["name"] for node in payload],
@@ -343,7 +345,8 @@ class ClientLifecycleTests(unittest.TestCase):
                         self.assertTrue(path.is_relative_to(home))
                         local = root / path.relative_to("/work")
                         self.assertEqual(local.read_bytes(), expected)
-                        self.assertEqual(local.stat().st_mode & 0o777, 0o600)
+                        if os.name != "nt":
+                            self.assertEqual(local.stat().st_mode & 0o777, 0o600)
                     if case["protocol"] == "trusttunnel":
                         self.assertEqual(listener["network"], ["udp"])
                         self.assertTrue(case["node_overrides"]["quic"])
@@ -372,7 +375,8 @@ class ClientLifecycleTests(unittest.TestCase):
             for name, expected in (("cert", b"b-cert"), ("key", b"b-key")):
                 target = directory / "client-identity" / (name + ".pem")
                 self.assertEqual(target.read_bytes(), expected)
-                self.assertEqual(target.stat().st_mode & 0o777, 0o600)
+                if os.name != "nt":
+                    self.assertEqual(target.stat().st_mode & 0o777, 0o600)
             self.assertNotIn("b-key", json.dumps(config))
             self.assertFalse(
                 any(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import posixpath
 import shutil
 import subprocess
 import sys
@@ -10,6 +11,7 @@ import tomllib
 from pathlib import Path, PurePosixPath
 
 from .core_comparison import CONTROLLER_ADDRESS
+from .guest_architecture import architecture, binary_format, elf_machine
 from .inputs import save, sha256, source_identity
 from .linux_builder import NATIVE_CACHE_PATH, RUST_TARGET
 
@@ -34,7 +36,7 @@ def source_mounts(source, *, guest_source="/src/cores/vole"):
                 ).strip()
             ).resolve(strict=True)
             destination = PurePosixPath(
-                os.path.normpath(guest_source + "/" + dependency["path"])
+                posixpath.normpath(guest_source + "/" + dependency["path"])
             )
             for _ in package.relative_to(repository).parts:
                 destination = destination.parent
@@ -172,15 +174,17 @@ def _cli_identity(guest, root):
     if (
         len(header) != 20
         or header[:6] != b"\x7fELF\x02\x01"
-        or int.from_bytes(header[18:20], "little") != 183
+        or int.from_bytes(header[18:20], "little") != elf_machine()
     ):
-        raise ValueError("Vole DUT must be a native Linux arm64 ELF executable")
+        raise ValueError(
+            f"Vole DUT must be a native Linux {architecture()} ELF executable"
+        )
     version = (root / "vole-version.log").read_text().strip()
     if expected not in version or expected.encode() not in binary.read_bytes():
         raise ValueError("Vole CLI build identity does not match the selected source")
     return {
         "binary_sha256": sha256(binary),
-        "binary_format": "ELF64 little-endian aarch64",
+        "binary_format": binary_format(),
         "build_identity": expected,
         "runtime_version": version,
         "lockfile_sha256": sha256(source / "Cargo.lock"),

@@ -22,8 +22,34 @@ def conclusions(work: Path) -> list[str]:
     for path in sorted(work.rglob("summary.md")):
         if path.is_symlink() or path.stat().st_size > 2 * 1024 * 1024:
             raise ValueError("comparison summary must be a bounded regular file")
-        lines += [f"## {path.parent.relative_to(work)}", path.read_text()]
+        lines += [f"## {path.parent.relative_to(work).as_posix()}", path.read_text()]
     return lines
+
+
+def _make_writable_tree(root):
+    """Release owned read-only files without following links or junctions."""
+
+    def make_writable(path):
+        metadata = path.lstat()
+        if stat.S_ISLNK(metadata.st_mode) or (
+            getattr(metadata, "st_file_attributes", 0)
+            & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+        ):
+            return False
+        if not metadata.st_mode & stat.S_IWUSR:
+            path.chmod(metadata.st_mode | stat.S_IWUSR)
+        return True
+
+    for current, directories, files in os.walk(root, followlinks=False):
+        directory = Path(current)
+        if not make_writable(directory):
+            directories.clear()
+            continue
+        directories[:] = [
+            name for name in directories if make_writable(directory / name)
+        ]
+        for name in files:
+            make_writable(directory / name)
 
 
 class Session:
@@ -128,10 +154,7 @@ class Session:
             ):
                 raise ValueError("invalid owned scratch directory")
             if not errors:
-                for _, _, _, directory in os.fwalk(self.work, follow_symlinks=False):
-                    mode = os.fstat(directory).st_mode
-                    if not mode & stat.S_IWUSR:
-                        os.fchmod(directory, mode | stat.S_IWUSR)
+                _make_writable_tree(self.work)
                 shutil.rmtree(self.work)
             self._write_report(details, errors)
         finally:

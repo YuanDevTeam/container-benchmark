@@ -4,6 +4,7 @@ import base64
 import hashlib
 import io
 import json
+import os
 import tarfile
 import tempfile
 import unittest
@@ -11,6 +12,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from container_benchmark import download_cache
+from container_benchmark import guest_architecture as arch
 from container_benchmark.interop import mihomo_lab as lab
 from container_benchmark.interop import ss_rust_interop as rust
 
@@ -48,7 +50,8 @@ class ShadowsocksRustInteropTests(unittest.TestCase):
             self.assertEqual(len(commands), len(selected))
             for case, command in zip(selected, commands, strict=True):
                 path = root / command["argv"][-1].removeprefix("/work/")
-                self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+                if os.name != "nt":
+                    self.assertEqual(path.stat().st_mode & 0o777, 0o600)
                 config = json.loads(path.read_text())
                 self.assertEqual(config["mode"], "tcp_and_udp")
                 self.assertEqual(len(config["servers"]), 1)
@@ -89,7 +92,7 @@ class ShadowsocksRustInteropTests(unittest.TestCase):
                     url,
                     "https://github.com/shadowsocks/shadowsocks-rust/releases/"
                     "download/v1.25.0/"
-                    "shadowsocks-v1.25.0.aarch64-unknown-linux-musl.tar.xz",
+                    f"shadowsocks-v1.25.0.{arch.musl_target()}.tar.xz",
                 )
                 self.assertEqual(limit, rust.MAX_DOWNLOAD)
                 with tarfile.open(path, "w:xz") as archive:
@@ -111,7 +114,7 @@ class ShadowsocksRustInteropTests(unittest.TestCase):
                     return_value=release_record(
                         rust.REPOSITORY,
                         "v1.25.0",
-                        ["shadowsocks-v1.25.0.aarch64-unknown-linux-musl.tar.xz"],
+                        [f"shadowsocks-v1.25.0.{arch.musl_target()}.tar.xz"],
                     ),
                 ),
                 patch.object(rust, "download", side_effect=download) as fetch,

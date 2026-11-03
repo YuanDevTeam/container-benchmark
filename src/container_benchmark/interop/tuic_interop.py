@@ -8,12 +8,13 @@ import re
 from pathlib import Path
 
 from ..download_cache import daily
+from ..guest_architecture import architecture, machine_name
 from ..releases import _read, release_asset
 from .mihomo_lab import download, save, sha256
 from .native_peer_releases import MAX_DOWNLOAD, _check_binary, _copy_cached
 
 REPOSITORY = "Itsusinn/tuic"
-ASSET = "tuic-server-aarch64-linux"
+ASSET = "tuic-server-" + machine_name() + "-linux"
 
 
 def latest_stable():
@@ -74,7 +75,7 @@ def latest_stable():
 
 
 def official_tuic(root):
-    """Copy the current official GNU/Linux ARM64 server; run version in guest."""
+    """Copy the current official native GNU/Linux server; run version in guest."""
     release = latest_stable()
     url = release_asset(REPOSITORY, release, ASSET)
 
@@ -87,7 +88,7 @@ def official_tuic(root):
             "peer": "Itsusinn TUIC v5",
             "release": release["release"],
             "url": url,
-            "architecture": "linux-arm64",
+            "architecture": "linux-" + architecture(),
             "archive_sha256": checksum,
             "binary_sha256": checksum,
         }

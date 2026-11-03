@@ -45,7 +45,7 @@ class PeerHealthTests(unittest.TestCase):
         original_open = Path.open
 
         def opening(path, *args, **kwargs):
-            if str(path).startswith("/proc/11/net/"):
+            if path.as_posix().startswith("/proc/11/net/"):
                 return io.BytesIO(read_table(path.name))
             return original_open(path, *args, **kwargs)
 
@@ -148,7 +148,7 @@ class PeerHealthTests(unittest.TestCase):
 
         def namespace(path):
             return Path(
-                "net:[100]" if str(path).startswith("/proc/12/") else "net:[99]"
+                "net:[100]" if path.as_posix().startswith("/proc/12/") else "net:[99]"
             )
 
         diag = Mock(side_effect=query)
@@ -457,16 +457,27 @@ class PeerHealthTests(unittest.TestCase):
             self.assertEqual(
                 [call[0] for call in calls],
                 [
-                    ["container", "inspect", guest.name],
-                    ["container", "logs", "--boot", "-n", "80", guest.name],
+                    pressure_peers.container_backend.run_argv(
+                        ["container", "inspect", guest.name]
+                    ),
+                    (
+                        ["wslc", "logs", "--tail", "80", guest.name]
+                        if pressure_peers.container_backend.is_windows()
+                        else ["container", "logs", "--boot", "-n", "80", guest.name]
+                    ),
                 ],
             )
             self.assertTrue(all(call[1] == 16384 for call in calls))
             for _, _, process in calls:
                 process.wait.assert_called_once_with(timeout=10)
             self.assertNotIn("fixture-secret", json.dumps(result))
-            self.assertEqual(result["host_container"]["boot"]["exit_code"], 0)
-            self.assertEqual(result["host_container"]["boot"]["timeout_seconds"], 10)
+            diagnostic = (
+                "logs" if pressure_peers.container_backend.is_windows() else "boot"
+            )
+            self.assertEqual(result["host_container"][diagnostic]["exit_code"], 0)
+            self.assertEqual(
+                result["host_container"][diagnostic]["timeout_seconds"], 10
+            )
 
     def test_healthy_peer_does_not_start_host_diagnostics(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -600,7 +611,7 @@ class PeerHealthTests(unittest.TestCase):
                     + "final-stack password=tail-secret\n"
                     + go_frame
                 )
-                (root / "peer/server-0.log").write_text(text)
+                (root / "peer/server-0.log").write_bytes(text.encode())
 
                 def unhealthy(_argv, log, **_kwargs):
                     log.write_text(

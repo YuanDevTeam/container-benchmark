@@ -1,6 +1,7 @@
 """Frozen source identities and immutable per-window files."""
 
 import errno
+import os
 import subprocess
 import tempfile
 import unittest
@@ -9,6 +10,7 @@ from unittest.mock import patch
 
 from container_benchmark.core_comparison import _check_sources
 from container_benchmark.inputs import (
+    materialize_input_directory,
     materialize_readonly_input,
     sha256,
     source_identity,
@@ -60,6 +62,21 @@ class SourceIdentityTests(unittest.TestCase):
 
 
 class ReadonlyInputTest(unittest.TestCase):
+    def test_directory_inputs_preserve_files_without_windows_symlink_privileges(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source, target = Path(directory) / "artifacts", Path(directory) / "job"
+            source.mkdir()
+            (source / "core").write_bytes(b"frozen binary")
+            materialize_input_directory(source, target)
+            self.assertEqual((target / "core").read_bytes(), b"frozen binary")
+            if os.name == "nt":
+                self.assertFalse(target.is_symlink())
+                self.assertNotEqual(
+                    (source / "core").stat().st_ino, (target / "core").stat().st_ino
+                )
+            else:
+                self.assertTrue(target.is_symlink())
+
     def test_executable_inputs_have_private_inodes_and_preserve_mode_and_bytes(self):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "source-cli"
@@ -71,7 +88,10 @@ class ReadonlyInputTest(unittest.TestCase):
             for target in [*targets, targets[0]]:
                 materialize_readonly_input(source, target)
                 self.assertNotEqual(source.stat().st_ino, target.stat().st_ino)
-                self.assertEqual(target.stat().st_mode & 0o777, 0o755)
+                self.assertEqual(
+                    target.stat().st_mode & 0o777,
+                    source.stat().st_mode & 0o777 if os.name == "nt" else 0o755,
+                )
                 self.assertEqual(target.read_bytes(), b"frozen executable")
             self.assertEqual(
                 len({path.stat().st_ino for path in [source, *targets]}), 3
@@ -91,11 +111,15 @@ class ReadonlyInputTest(unittest.TestCase):
             for _ in range(2):
                 materialize_readonly_input(source, target)
                 self.assertFalse(target.is_symlink())
-                self.assertEqual(source.stat().st_ino, target.stat().st_ino)
+                if os.name == "nt":
+                    self.assertNotEqual(source.stat().st_ino, target.stat().st_ino)
+                else:
+                    self.assertEqual(source.stat().st_ino, target.stat().st_ino)
                 self.assertEqual(target.read_bytes(), b"frozen input")
             target.unlink()
             self.assertEqual(source.read_bytes(), b"frozen input")
 
+    @unittest.skipIf(os.name == "nt", "Windows inputs always use private copies")
     def test_cross_filesystem_copy_preserves_mode_when_replacing_link(self):
         with tempfile.TemporaryDirectory() as directory:
             source, target = (

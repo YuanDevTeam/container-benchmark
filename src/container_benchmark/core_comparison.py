@@ -9,13 +9,14 @@ import importlib.util
 import json
 import os
 import re
-import resource
 import subprocess
 import sys
 import time
 from pathlib import Path
 from types import SimpleNamespace
 
+from .container_backend import ensure_runtime
+from .container_resources import MEMORY_BYTES
 from .pressure_acceptance import (
     annotate_pressure_case,
     annotate_reference_acceptance,
@@ -694,6 +695,7 @@ def _phase_memory(path, barrier_ns, seconds):
 
 def _guest_run(root, core):
     import contextlib
+    import resource
 
     from . import workload
     from .inputs import save
@@ -986,7 +988,7 @@ def _run_window(
     phase="acceptance",
 ):
     from . import workload
-    from .inputs import save
+    from .inputs import materialize_input_directory, save
 
     protocol = profile.name
     check_sources()
@@ -1001,7 +1003,7 @@ def _run_window(
     job = root / (f"{protocol}-{core}-{transport}-{rate}-r{repeat}" + suffix)
     job.mkdir()
     for name in ("artifacts", "rules"):
-        (job / name).symlink_to("../" + name, target_is_directory=True)
+        materialize_input_directory(root / name, job / name)
     save(
         job / "request.json",
         {
@@ -1388,6 +1390,7 @@ def main(argv=None, *, stress=False, experience=False):
         if not pending:
             print("No pending pressure windows; no resources created.", flush=True)
             return 0
+    ensure_runtime()
     from . import core_mihomo_adapter, core_vole_adapter
     from .geodata import (
         acquire,
@@ -1424,7 +1427,7 @@ def main(argv=None, *, stress=False, experience=False):
                 "udp_destinations": 64,
                 "dns_qps": parsed.dns_qps,
                 "cpus": 5,
-                "memory_bytes": 8 * 1024**3,
+                "memory_bytes": MEMORY_BYTES,
                 "network": "NAT",
                 "queue_overrides": {
                     "tun0_txqueuelen": QUEUE_LENGTH,

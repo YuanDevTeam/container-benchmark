@@ -10,7 +10,6 @@ from __future__ import annotations
 import argparse
 import contextlib
 import ctypes
-import fcntl
 import hashlib
 import http.client
 import http.server
@@ -129,6 +128,8 @@ def capabilities(role):
 
 def ethtool_bytes(control, data):
     """One SIOCETHTOOL call on this guest's fixed eth0, no ethtool executable."""
+    import fcntl
+
     payload = ctypes.create_string_buffer(data, len(data))
     request = bytearray(40 if ctypes.sizeof(ctypes.c_void_p) == 8 else 32)
     struct.pack_into("@16sP", request, 0, b"eth0", ctypes.addressof(payload))

@@ -1,6 +1,7 @@
 """Protocol capacity selection must preserve actual wire capabilities."""
 
 import json
+import shutil
 import tempfile
 import unittest
 from contextlib import contextmanager
@@ -84,6 +85,9 @@ class PressureProfileTests(unittest.TestCase):
             if name.startswith("trusttunnel-"):
                 self.assertEqual(profile.backend, "mihomo")
 
+    @unittest.skipUnless(
+        shutil.which("openssl"), "requires the host OpenSSL executable"
+    )
     def test_masque_pressure_uses_both_owned_origins_and_real_dns(self):
         origins = [
             SimpleNamespace(ipv4="198.51.100.2"),
@@ -137,6 +141,9 @@ class PressureProfileTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             (root / "peer").mkdir()
+            (root / "artifacts").mkdir()
+            for name in ("cert.pem", "key.pem"):
+                (root / "peer" / name).write_bytes(b"synthetic owned fixture")
             guest = SimpleNamespace(ipv4="192.0.2.4", execute=Mock())
             origins = (object(), object())
             owner = PeerLab(root, guest, "pin", object(), origins=origins)

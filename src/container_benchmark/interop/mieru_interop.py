@@ -13,6 +13,7 @@ import tarfile
 from copy import deepcopy
 from pathlib import Path
 
+from ..guest_architecture import architecture
 from ..releases import latest_release, release_asset
 from .mihomo_lab import download, sha256
 from .native_peer_releases import MAX_BINARY, MAX_DOWNLOAD, _check_binary, _copy_cached
@@ -63,11 +64,11 @@ def encoded_traffic_pattern():
 
 
 def official_mieru(root):
-    """Retain only mita from the latest stable official Linux ARM64 package."""
+    """Retain only mita from the latest stable official native Linux package."""
 
     resolved = latest_release(REPOSITORY)
     release = resolved["release"]
-    package_name = f"mita_{release.removeprefix('v')}_linux_arm64.tar.gz"
+    package_name = f"mita_{release.removeprefix('v')}_linux_{architecture()}.tar.gz"
     url = release_asset(REPOSITORY, resolved, package_name)
 
     def prepare(staging):
@@ -100,7 +101,7 @@ def official_mieru(root):
             "peer": "Mieru (mita)",
             "release": release,
             "url": url,
-            "architecture": "linux-arm64",
+            "architecture": "linux-" + architecture(),
             "archive_sha256": archive_sha,
             "binary_sha256": sha256(binary),
         }
@@ -109,7 +110,7 @@ def official_mieru(root):
         root,
         "mita",
         prepare,
-        cache_key="mieru-official-release-linux-arm64",
+        cache_key="mieru-official-release",
         release=release,
     )
 

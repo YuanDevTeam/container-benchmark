@@ -16,6 +16,7 @@ import time
 import urllib.request
 from pathlib import Path
 
+from ..guest_architecture import musl_target
 from ..releases import latest_release, release_asset
 from . import mihomo_interop as reference
 from . import ss_rust_interop
@@ -70,7 +71,7 @@ def official_shadowtls(root):
     repo = "ihciah/shadow-tls"
     resolved = latest_release(repo)
     tag = resolved["release"]
-    url = release_asset(repo, resolved, "shadow-tls-aarch64-unknown-linux-musl")
+    url = release_asset(repo, resolved, "shadow-tls-" + musl_target())
 
     def prepare(staging):
         binary = staging / "shadow-tls"

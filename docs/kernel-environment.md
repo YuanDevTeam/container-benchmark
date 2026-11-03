@@ -1,6 +1,8 @@
 # Linux 测试内核
 
-Apple container 的新建 ARM64 容器默认使用 **7.3.0-vole-kata430**，并配套官方 **TCP Brutal 2.0.1** 模块。当前环境为官方 Ubuntu 26.04 LTS、NAT；构建容器为 5 CPU／16 GiB，运行容器为 5 CPU／8 GiB，构建与负载不重叠。旧结果保留各自的内核身份，不因默认内核更新而重新签署。
+Apple container 的新建 ARM64 容器默认使用 **7.3.0-vole-kata430**，并配套官方 **TCP Brutal 2.0.1** 模块。下述缓存、模块签名和已验证能力属于这一 Apple ARM64 环境；Windows 的 `wslc` 使用实际 WSL session 内核，不能使用这里的 ARM64 Image 或模块为其代签，详见 [Windows / wslc](windows-wslc.md)。
+
+两后端均使用官方 Ubuntu 26.04 LTS、NAT；构建容器为 5 CPU／16 GiB，运行容器为 5 CPU／4 GiB，构建与负载不重叠。每次运行记录实际 guest 架构与内核身份；旧结果保留原输入，不因后端或默认内核更新而重新签署。
 
 ## 最终配置与缓存
 

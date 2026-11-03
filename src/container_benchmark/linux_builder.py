@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import platform
 import re
 import shlex
 import shutil
@@ -17,6 +18,7 @@ import uuid
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 
+from . import container_backend
 from .container_resources import CPUS, allocation
 from .containers import (
     IMAGE,
@@ -30,6 +32,7 @@ from .containers import (
     ubuntu_identity,
 )
 from .download_cache import daily
+from .guest_architecture import architecture, machine_name, rust_target
 from .inputs import save, sha256
 from .paths import BENCHMARK_ROOT, FIXTURE_ROOT
 
@@ -60,7 +63,7 @@ PACKAGES = (
     "unzip",
 )
 NATIVE_CACHE_PATH = "/usr/local/vole-native"
-RUST_TARGET = "aarch64-unknown-linux-gnu"
+RUST_TARGET = rust_target()
 RUST_ARCHIVE = f"rust-stable-{RUST_TARGET}.tar.xz"
 RUST_CHANNEL_URL = "https://static.rust-lang.org/dist/channel-rust-stable.toml"
 RUST_COMPONENTS = ("rustc", "cargo", "rust-std-" + RUST_TARGET)
@@ -174,6 +177,7 @@ class LinuxGuest:
         self.root = Path(root)
         self.image = image
         self.cache = cache
+        self.role = role
         if network not in (NETWORK, "default"):
             raise ValueError("unsupported owned Linux guest network")
         self.network = network
@@ -250,7 +254,7 @@ class LinuxGuest:
                 *(["--kernel", self.kernel["path"]] if self.kernel else []),
                 *self.resource_arguments,
                 "--arch",
-                "arm64",
+                architecture(),
                 "--cap-add",
                 "ALL",
                 "--env",
@@ -325,6 +329,12 @@ class LinuxGuest:
                     command("exec", self.name, "/bin/cat", "/etc/os-release")
                 )
             )
+            machine = command("exec", self.name, "/bin/uname", "-m").strip()
+            if machine != machine_name():
+                raise RuntimeError(
+                    "owned guest architecture differs from the native host"
+                )
+            self.record.update(architecture=architecture(), machine=machine)
             release = command("exec", self.name, "/bin/uname", "-r").strip()
             if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,255}", release) is None:
                 raise RuntimeError("owned guest kernel release was not observed")
@@ -333,10 +343,28 @@ class LinuxGuest:
                 self.record["kernel"]["uname_release"] = release
                 self._check_kernel()
             network = state["status"]["networks"][0]
-            if network["mtu"] != 1500:
+            if platform.system() == "Windows":
+                observed_mtu = command(
+                    "exec", self.name, "/bin/cat", "/sys/class/net/eth0/mtu"
+                ).strip()
+                if not observed_mtu.isdecimal():
+                    raise RuntimeError("owned guest network MTU was not observed")
+                mtu = int(observed_mtu)
+            else:
+                mtu = network["mtu"]
+            if mtu != 1500:
                 raise RuntimeError("Linux benchmark guest MTU differs from 1500")
+            self.record["mtu"] = mtu
             self.ipv4 = network["ipv4Address"].split("/")[0]
             self.ipv6 = network.get("ipv6Address", "").split("/")[0]
+            if self.role not in {"builder", "packages"} and not self.role.endswith(
+                "-builder"
+            ):
+                namespace = container_backend.prepare_tun_namespace(
+                    self.name, execute=command
+                )
+                if namespace is not None:
+                    self.record["tun_namespace"] = namespace
             return self
         except BaseException:
             self.peer.stop()
@@ -382,6 +410,7 @@ class LinuxGuest:
 
 def builder_inputs(root):
     """Refresh official image/deb identities once daily; never cache candidate code."""
+    container_backend.ensure_runtime()
     image = shared_image(IMAGE, root / "builder-image.log")
     pinned = IMAGE.rsplit(":", 1)[0] + "@" + image["digest"]
 
@@ -428,7 +457,12 @@ def builder_inputs(root):
         return {"image": image["digest"], "packages": files}
 
     packages = daily(
-        "linux-builder-debs:" + image["digest"] + ":" + ",".join(PACKAGES),
+        "linux-builder-debs:"
+        + architecture()
+        + ":"
+        + image["digest"]
+        + ":"
+        + ",".join(PACKAGES),
         prepare,
         directory=root / "builder-tools",
     )
@@ -535,10 +569,14 @@ def build_traffic(root):
             FIXTURE_ROOT / "workload/pacing_linux.go",
         ],
         artifacts / "traffic-build.log",
-        env=os.environ | {"GOOS": "linux", "GOARCH": "arm64", "CGO_ENABLED": "0"},
+        env=os.environ
+        | {"GOOS": "linux", "GOARCH": architecture(), "CGO_ENABLED": "0"},
         timeout=180,
     )
     result = subprocess.check_output(["go", "version"], text=True).strip()
-    if not re.fullmatch(r"go version go[0-9.]+ darwin/arm64", result):
+    host_os = {"Darwin": "darwin", "Windows": "windows"}.get(platform.system())
+    if host_os is None or not re.fullmatch(
+        r"go version go[0-9.]+ " + host_os + "/" + architecture(), result
+    ):
         raise RuntimeError("unsupported host Go toolchain identity")
     return result

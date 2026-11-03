@@ -4,10 +4,14 @@ import importlib.util
 import json
 import struct
 import subprocess
+import sys
 import unittest
 from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import call, patch
+
+if sys.platform != "linux":
+    raise unittest.SkipTest("Linux TUN ioctl and namespace fixture requires Linux")
 
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures/workload/tun.py"
 SPEC = importlib.util.spec_from_file_location("linux_tun_fixture", FIXTURE)

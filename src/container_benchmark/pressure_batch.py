@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 import re
 from copy import deepcopy
 from dataclasses import replace
 
-from .inputs import save
+from .inputs import materialize_input_directory, materialize_readonly_input, save
 from .pressure_peer_health import MAX_PROCESSES
 from .pressure_peers import PeerLab
 
@@ -53,11 +54,13 @@ def serving(owner, profiles):
         identities[profile.backend] = owner.prepare(profile.backend)
         directory = owner.root / "profiles" / profile.name
         (directory / "peer").mkdir(parents=True)
-        (directory / "artifacts").symlink_to(
-            "../../artifacts", target_is_directory=True
-        )
+        materialize_input_directory(owner.root / "artifacts", directory / "artifacts")
         for name in ("cert.pem", "key.pem"):
-            (directory / "peer" / name).symlink_to("../../../peer/" + name)
+            target = directory / "peer" / name
+            if os.name == "nt":
+                materialize_readonly_input(owner.root / "peer" / name, target)
+            else:
+                target.symlink_to("../../../peer/" + name)
         prefix = "/run/benchmark/pressure-peers/profiles/" + profile.name
         owner.guest.execute(["ln", "-sfnT", prefix, "/work"], directory / "select.log")
         worker = PeerLab(

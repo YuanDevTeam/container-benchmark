@@ -39,7 +39,7 @@ from .http_experience_io import (
     schedule,
 )
 from .http_inputs import private_ca_file
-from .inputs import save, sha256, source_identity
+from .inputs import materialize_input_directory, save, sha256, source_identity
 
 HOSTS = ("a.test", "opaque.test")
 FINALS = ("b.test", "opaque.test")
@@ -1209,9 +1209,7 @@ def run(
                         raise ValueError("HTTP source/binary changed between windows")
                     job = root / name
                     job.mkdir()
-                    (job / "artifacts").symlink_to(
-                        "../artifacts", target_is_directory=True
-                    )
+                    materialize_input_directory(root / "artifacts", job / "artifacts")
                     print(
                         f"HTTP experience {name}: "
                         + getattr(

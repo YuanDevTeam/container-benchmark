@@ -1,4 +1,3 @@
-import importlib.util
 import json
 import tempfile
 import unittest
@@ -7,13 +6,6 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from container_benchmark import core_mihomo_adapter as mihomo
-from container_benchmark.paths import FIXTURE_ROOT
-
-SPEC = importlib.util.spec_from_file_location(
-    "mihomo_tun_fixture", FIXTURE_ROOT / "workload/tun.py"
-)
-linux_tun = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(linux_tun)
 
 
 class MihomoAdapterTest(unittest.TestCase):
@@ -27,8 +19,7 @@ class MihomoAdapterTest(unittest.TestCase):
             SimpleNamespace(ipv4="192.0.2.2"),
             SimpleNamespace(ipv4="192.0.2.3"),
         ]
-        tun = linux_tun.RealTun()
-        tun.fd = 11
+        tun = SimpleNamespace(fd=11, device="tun0")
         self.result = mihomo.configure(
             self.root / "mihomo",
             self.assets,

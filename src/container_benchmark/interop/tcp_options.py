@@ -22,6 +22,7 @@ import time
 from pathlib import Path
 
 from .. import tcp_options as options
+from ..guest_architecture import architecture, elf_machine
 from ..pressure_catalog import Profile
 from ..tun_workload import RealTunWorkload
 from . import mihomo_interop as reference
@@ -967,14 +968,18 @@ def run(source, binary, output, requested=None, *, library=None):
     from .mihomo_lab import install_tools
 
     selected = selection(requested)
+    if architecture() != "arm64":
+        raise RuntimeError(
+            "TCP option fixtures require the verified ARM64 guest kernel and module"
+        )
     artifact = (library if library is not None else binary).resolve(strict=True)
     with artifact.open("rb") as stream:
         header = stream.read(20)
     if (
         header[:6] != b"\x7fELF\x02\x01"
-        or int.from_bytes(header[18:20], "little") != 183
+        or int.from_bytes(header[18:20], "little") != elf_machine()
     ):
-        raise ValueError("TCP option consumers require an ARM64 Linux CLI or library")
+        raise ValueError("TCP option consumers require a native Linux CLI or library")
     native = library is not None
     report = {
         "status": "ERROR",

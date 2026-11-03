@@ -14,7 +14,14 @@ import urllib.request
 from copy import deepcopy
 from pathlib import Path
 
-from .inputs import redact, save, sha256
+from . import container_backend
+from .inputs import (
+    materialize_input_directory,
+    materialize_readonly_input,
+    redact,
+    save,
+    sha256,
+)
 from .interop import mihomo_interop as reference
 from .linux_builder import LinuxGuest, install_tools
 from .peer_buffers import receive_buffer_profile
@@ -186,13 +193,21 @@ class PeerLab:
             result["host_container"] = {"name": name}
             for operation, arguments in (
                 ("inspect", ["inspect", name]),
-                ("boot", ["logs", "--boot", "-n", "80", name]),
+                (
+                    "logs" if container_backend.is_windows() else "boot",
+                    ["logs", "--tail", "80", name]
+                    if container_backend.is_windows()
+                    else ["logs", "--boot", "-n", "80", name],
+                ),
             ):
                 record = {}
                 path = output.with_name(output.stem + "-host-" + operation + ".log")
                 try:
                     with OwnedProcess(
-                        ["container", *arguments], path, record, limit=16384
+                        container_backend.run_argv(["container", *arguments]),
+                        path,
+                        record,
+                        limit=16384,
                     ) as child:
                         try:
                             child.process.wait(timeout=10)
@@ -408,9 +423,13 @@ class PeerLab:
         identity = self.prepare(profile.backend)
         selected = self.root / "profiles" / profile.name
         (selected / "peer").mkdir(parents=True)
-        (selected / "artifacts").symlink_to("../../artifacts", target_is_directory=True)
+        materialize_input_directory(self.root / "artifacts", selected / "artifacts")
         for name in ("cert.pem", "key.pem"):
-            (selected / "peer" / name).symlink_to("../../../peer/" + name)
+            target = selected / "peer" / name
+            if os.name == "nt":
+                materialize_readonly_input(self.root / "peer" / name, target)
+            else:
+                target.symlink_to("../../../peer/" + name)
         # Fresh paths avoid guest filesystem caches observing a host atomic
         # replacement as ENOENT. Only the guest changes its /work alias.
         self.guest.execute(
@@ -895,7 +914,7 @@ def lab(root, image, witnesses, origins, dns, *, kernel=None):
 
     directory = root / "pressure-peers"
     directory.mkdir()
-    (directory / "artifacts").symlink_to("../artifacts", target_is_directory=True)
+    materialize_input_directory(root / "artifacts", directory / "artifacts")
     pin = reference._certificate(directory)
     with LinuxGuest(
         root, image, cache=module_cache(), role="protocol-peer", kernel=kernel

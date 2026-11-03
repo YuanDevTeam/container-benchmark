@@ -18,7 +18,7 @@ class ContainerResourceTests(unittest.TestCase):
             self.assertEqual(arguments, ("--cpus", "5", "--memory", "16G"))
             self.assertEqual(memory, 16 * 1024**3)
 
-    def test_runtime_roles_keep_8_gib_including_peer_helper_builds(self):
+    def test_runtime_roles_keep_4_gib_including_peer_helper_builds(self):
         for role in (
             "core",
             "consumer",
@@ -29,8 +29,8 @@ class ContainerResourceTests(unittest.TestCase):
             "packages",
         ):
             arguments, memory = resources.allocation(role)
-            self.assertEqual(arguments, ("--cpus", "5", "--memory", "8G"))
-            self.assertEqual(memory, 8 * 1024**3)
+            self.assertEqual(arguments, ("--cpus", "5", "--memory", "4G"))
+            self.assertEqual(memory, 4 * 1024**3)
 
 
 if __name__ == "__main__":

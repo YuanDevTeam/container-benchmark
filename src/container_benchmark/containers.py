@@ -1,4 +1,4 @@
-"""Exact owned Apple containers on one shared official Ubuntu NAT baseline."""
+"""Exact owned containers on one shared official Ubuntu NAT baseline."""
 
 from __future__ import annotations
 
@@ -10,8 +10,9 @@ import socket
 import subprocess
 import time
 
-from . import ownership
+from . import container_backend, ownership
 from .download_cache import daily
+from .guest_architecture import architecture
 
 NETWORK = "benchmark-nat"
 PURPOSE = ownership.PURPOSE
@@ -40,7 +41,7 @@ def run_logged(argv, log, *, timeout=1800, env=None, cwd=None):
     """A checked bounded-duration child; its guest lifetime belongs to its owner."""
     with log.open("wb") as output:
         subprocess.run(
-            [str(value) for value in argv],
+            container_backend.run_argv(argv),
             stdout=output,
             stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,
@@ -54,17 +55,7 @@ def run_logged(argv, log, *, timeout=1800, env=None, cwd=None):
 def command(*argv, timeout=30):
     acquiring = argv[0] == "run" or argv[:2] == ("image", "pull")
     with ownership.run_image(argv if acquiring else ()):
-        result = subprocess.run(
-            ["container", *map(str, argv)],
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
-        )
-    if result.returncode:
-        detail = result.stderr[-1000:].strip()
-        raise RuntimeError(f"container {argv[0]} failed: {detail}")
-    return result.stdout
+        return container_backend.command(*argv, timeout=timeout)
 
 
 def _image_digest(ref):
@@ -101,7 +92,9 @@ def shared_image(ref=IMAGE, log=None):
         return False
 
     identity = daily(
-        "container-image:" + ref + ":linux-arm64", prepare, validate=validate
+        "container-image:" + ref + ":linux-" + architecture(),
+        prepare,
+        validate=validate,
     )
     ownership.share_image(ref)
     ownership.share_image(ref.rsplit(":", 1)[0] + "@" + identity["digest"])
@@ -157,10 +150,25 @@ class ContainerPeer:
                 raise RuntimeError("owned origin exited before readiness")
             address = row["status"]["networks"][0]["ipv4Address"].split("/")[0]
             try:
-                with socket.create_connection((address, port), timeout=0.2):
-                    self.record["ready"] = True
-                    return
-            except OSError:
+                if container_backend.is_windows():
+                    # WSLC bridge addresses need not be reachable from Windows.
+                    command(
+                        "exec",
+                        self.name,
+                        "python3",
+                        "-B",
+                        "-c",
+                        "import socket,sys; socket.create_connection("
+                        "('127.0.0.1',int(sys.argv[1])),timeout=0.2).close()",
+                        str(port),
+                        timeout=5,
+                    )
+                else:
+                    with socket.create_connection((address, port), timeout=0.2):
+                        pass
+                self.record["ready"] = True
+                return
+            except (OSError, container_backend.ContainerError):
                 time.sleep(0.05)
         raise TimeoutError("owned origin TCP readiness failed")
 

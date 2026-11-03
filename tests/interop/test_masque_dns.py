@@ -2,6 +2,7 @@
 
 import importlib.util
 import json
+import os
 import socket
 import struct
 import tempfile
@@ -62,7 +63,8 @@ class MasqueDnsTests(unittest.TestCase):
                     "rejected_queries": 1,
                 },
             )
-            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            if os.name != "nt":
+                self.assertEqual(path.stat().st_mode & 0o777, 0o600)
 
     def test_domain_probe_uses_tun_domain_mapping_and_peer_witness(self):
         for case in [row for row in masque.cases(["masque"]) if row.get("node_dns")]:

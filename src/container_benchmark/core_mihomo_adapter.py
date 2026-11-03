@@ -15,7 +15,7 @@ from .releases import prepare_binary
 
 
 def prepare(directory):
-    """Copy the official latest stable Linux ARM64 binary into run inputs."""
+    """Copy the official latest stable native Linux binary into run inputs."""
     return prepare_binary(directory)
 
 

@@ -1,6 +1,7 @@
 """Official TUIC release/configuration checks without network or native execution."""
 
 import json
+import os
 import struct
 import tempfile
 import unittest
@@ -9,6 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from container_benchmark import download_cache
+from container_benchmark import guest_architecture as arch
 from container_benchmark.interop import mihomo_interop as reference
 from container_benchmark.interop import tuic_interop as tuic
 
@@ -31,7 +33,7 @@ def release(tag, *, draft=False, prerelease=False):
 def elf():
     header = bytearray(64)
     header[:7] = b"\x7fELF\x02\x01\x01"
-    struct.pack_into("<HH", header, 16, 2, 183)
+    struct.pack_into("<HH", header, 16, 2, arch.elf_machine())
     return bytes(header) + b"official-server-offline-fixture"
 
 
@@ -137,7 +139,8 @@ class OfficialTuicTests(unittest.TestCase):
                     command["argv"][1:], ["-c", "/work/peer/" + config_path.name]
                 )
                 self.assertEqual(command["udp_ports"], [case["port"]])
-                self.assertEqual(config_path.stat().st_mode & 0o777, 0o600)
+                if os.name != "nt":
+                    self.assertEqual(config_path.stat().st_mode & 0o777, 0o600)
             node = reference.node(cases[1], "192.0.2.20", "b" * 64)
             self.assertTrue(node["disable-sni"])
             self.assertEqual(node["fingerprint"], "a" * 64)

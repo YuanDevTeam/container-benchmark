@@ -2,6 +2,7 @@
 
 import contextlib
 import io
+import os
 import tarfile
 import tempfile
 import tomllib
@@ -10,6 +11,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from container_benchmark import download_cache
+from container_benchmark import guest_architecture as arch
 from container_benchmark.cli import main
 from container_benchmark.interop import mihomo_interop as interop
 from container_benchmark.interop import mihomo_lab as lab
@@ -64,9 +66,10 @@ class TrustTunnelInteropTests(unittest.TestCase):
             self.assertEqual(hosts["main_hosts"][0]["hostname"], client["sni"])
             self.assertEqual(credentials["client"][0]["username"], client["username"])
             self.assertEqual(credentials["client"][0]["password"], client["password"])
-            self.assertEqual(
-                (root / "peer/credentials.toml").stat().st_mode & 0o777, 0o600
-            )
+            if os.name != "nt":
+                self.assertEqual(
+                    (root / "peer/credentials.toml").stat().st_mode & 0o777, 0o600
+                )
             self.assertEqual(commands[0]["argv"][0], "/work/artifacts/trusttunnel")
             self.assertFalse(client["quic"])
             self.assertFalse(client["udp"])
@@ -149,7 +152,7 @@ class TrustTunnelInteropTests(unittest.TestCase):
 
     def test_official_package_retains_only_the_expected_endpoint(self):
         release = "v1.1.0"
-        name = f"trusttunnel-{release}-linux-aarch64.tar.gz"
+        name = f"trusttunnel-{release}-linux-{arch.machine_name()}.tar.gz"
         resolved = {
             "release": release,
             "repository": trusttunnel.REPOSITORY,
@@ -165,13 +168,19 @@ class TrustTunnelInteropTests(unittest.TestCase):
             self.assertEqual(
                 url,
                 "https://github.com/TrustTunnel/TrustTunnel/releases/download/"
-                "v1.1.0/trusttunnel-v1.1.0-linux-aarch64.tar.gz",
+                f"v1.1.0/trusttunnel-v1.1.0-linux-{arch.machine_name()}.tar.gz",
             )
             with tarfile.open(path, "w:gz") as archive:
                 for name, data in (
                     ("../not-extracted", b"ignored"),
-                    ("trusttunnel-v1.1.0-linux-aarch64/trusttunnel_endpoint", elf()),
-                    ("trusttunnel-v1.1.0-linux-aarch64/setup_wizard", b"ignored"),
+                    (
+                        f"trusttunnel-v1.1.0-linux-{arch.machine_name()}/trusttunnel_endpoint",
+                        elf(),
+                    ),
+                    (
+                        f"trusttunnel-v1.1.0-linux-{arch.machine_name()}/setup_wizard",
+                        b"ignored",
+                    ),
                 ):
                     entry = tarfile.TarInfo(name)
                     entry.size = len(data)

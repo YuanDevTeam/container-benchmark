@@ -13,6 +13,7 @@ import tarfile
 import zipfile
 from pathlib import Path
 
+from ..guest_architecture import architecture, v2ray_arch
 from ..releases import latest_release, release_asset
 from .mihomo_lab import download, sha256
 from .native_peer_releases import MAX_BINARY, MAX_DOWNLOAD, _check_binary, _copy_cached
@@ -30,10 +31,10 @@ CADDY_REPOSITORY = "caddyserver/caddy"
 
 
 def official_v2ray(root):
-    """Copy official latest Linux ARM64 V2Ray; only execute it in the guest."""
+    """Copy official latest native Linux V2Ray; only execute it in the guest."""
 
     resolved = latest_release(V2RAY_REPOSITORY)
-    url = release_asset(V2RAY_REPOSITORY, resolved, "v2ray-linux-arm64-v8a.zip")
+    url = release_asset(V2RAY_REPOSITORY, resolved, f"v2ray-linux-{v2ray_arch()}.zip")
 
     def prepare(staging):
         archive, binary = staging / "v2ray.zip", staging / "v2ray"
@@ -67,7 +68,7 @@ def official_v2ray(root):
             "peer": "V2Ray",
             "url": url,
             "release": resolved["release"],
-            "architecture": "linux-arm64",
+            "architecture": "linux-" + architecture(),
             "archive_sha256": archive_sha,
             "binary_sha256": sha256(binary),
         }
@@ -80,7 +81,7 @@ def official_caddy(root):
 
     resolved = latest_release(CADDY_REPOSITORY)
     release = resolved["release"]
-    asset = "caddy_" + release.removeprefix("v") + "_linux_arm64.tar.gz"
+    asset = "caddy_" + release.removeprefix("v") + f"_linux_{architecture()}.tar.gz"
     url = release_asset(CADDY_REPOSITORY, resolved, asset)
 
     def prepare(staging):
@@ -117,7 +118,7 @@ def official_caddy(root):
             "peer": "Caddy",
             "release": release,
             "url": url,
-            "architecture": "linux-arm64",
+            "architecture": "linux-" + architecture(),
             "archive_sha256": archive_sha,
             "binary_sha256": sha256(binary),
             "source": "official-release-download",
@@ -128,7 +129,7 @@ def official_caddy(root):
         root,
         "caddy",
         prepare,
-        cache_key="caddy-official-release-linux-arm64",
+        cache_key="caddy-official-release",
         release=release,
     )
 

@@ -17,6 +17,9 @@ from container_benchmark.native_process import NativeProcess
 
 
 class NativeProcessTests(unittest.TestCase):
+    @unittest.skipUnless(
+        sys.platform == "linux", "Linux exec metadata and permission bits"
+    )
     def test_exec_permission_failure_preserves_bounded_path_evidence(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -69,6 +72,9 @@ class NativeProcessTests(unittest.TestCase):
             self.assertNotIn("private-argument", raw)
             self.assertEqual(binary.stat().st_mode & 0o777, 0o751)
 
+    @unittest.skipUnless(
+        sys.platform == "linux", "Linux exec metadata and permission bits"
+    )
     def test_exec_failure_evidence_handles_disappearing_binary_directory(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -111,7 +117,7 @@ class NativeProcessTests(unittest.TestCase):
         thread_type = threading.Thread
 
         def read_text(path, *args, **kwargs):
-            if str(path) == f"/proc/{pid}/stat":
+            if path.as_posix() == f"/proc/{pid}/stat":
                 fields = ["0"] * 22
                 fields[0] = counters.get("state", "S")
                 fields[6] = str(counters.get("flags", 0))
@@ -119,12 +125,12 @@ class NativeProcessTests(unittest.TestCase):
                 fields[17] = str(counters.get("threads", 3))
                 fields[19] = str(counters.get("start", 10))
                 return f"{pid} (selected core) " + " ".join(fields)
-            if str(path) == f"/proc/{pid}/status":
+            if path.as_posix() == f"/proc/{pid}/status":
                 return f"VmRSS:\t{counters['rss']} kB\nVmHWM:\t{counters['hwm']} kB\n"
             return original_read(path, *args, **kwargs)
 
         def stat(path, *args, **kwargs):
-            if str(path) == f"/proc/{pid}/exe":
+            if path.as_posix() == f"/proc/{pid}/exe":
                 return image
             return original_stat(path, *args, **kwargs)
 
@@ -142,7 +148,21 @@ class NativeProcessTests(unittest.TestCase):
             patch.dict(os.environ, {"BENCHMARK_ISOLATED": "1"}),
             patch.object(Path, "read_text", read_text),
             patch.object(Path, "stat", stat),
-            patch("container_benchmark.native_process.os.sysconf", return_value=100),
+            patch(
+                "container_benchmark.native_process.os.sysconf",
+                return_value=100,
+                create=True,
+            ),
+            patch("container_benchmark.native_process.os.WNOHANG", 1, create=True),
+            patch(
+                "container_benchmark.native_process.os.waitstatus_to_exitcode",
+                side_effect=lambda status: (
+                    -(status & 0x7F) if status & 0x7F else status >> 8
+                ),
+                create=True,
+            ),
+            patch("container_benchmark.native_process.os.killpg", create=True),
+            patch("container_benchmark.native_process.signal.SIGKILL", 9, create=True),
             patch(
                 "container_benchmark.native_process.subprocess.Popen",
                 return_value=child,
@@ -151,6 +171,7 @@ class NativeProcessTests(unittest.TestCase):
             patch(
                 "container_benchmark.native_process.os.wait4",
                 return_value=(pid, 0, usage),
+                create=True,
             ),
         ):
             process = NativeProcess(
@@ -304,13 +325,17 @@ class NativeProcessTests(unittest.TestCase):
                     process,
                     "sample",
                     side_effect=FileNotFoundError(
-                        errno.ENOENT, "exited", f"/proc/{process.child.pid}/exe"
+                        errno.ENOENT,
+                        "exited",
+                        str(Path(f"/proc/{process.child.pid}/exe")),
                     ),
                 ),
                 patch(
                     "container_benchmark.native_process._process_stat",
                     side_effect=FileNotFoundError(
-                        errno.ENOENT, "exited", f"/proc/{process.child.pid}/stat"
+                        errno.ENOENT,
+                        "exited",
+                        str(Path(f"/proc/{process.child.pid}/stat")),
                     ),
                 ),
                 patch(
@@ -378,7 +403,7 @@ class NativeProcessTests(unittest.TestCase):
             original_stat = Path.stat
 
             def missing_exe(path, *args, **kwargs):
-                if str(path) == f"/proc/{process.child.pid}/exe":
+                if path.as_posix() == f"/proc/{process.child.pid}/exe":
                     counters["state"] = "Z"
                     raise FileNotFoundError(errno.ENOENT, "missing", str(path))
                 return original_stat(path, *args, **kwargs)
@@ -426,7 +451,9 @@ class NativeProcessTests(unittest.TestCase):
                         process,
                         "sample",
                         side_effect=FileNotFoundError(
-                            errno.ENOENT, "missing", f"/proc/{process.child.pid}/exe"
+                            errno.ENOENT,
+                            "missing",
+                            str(Path(f"/proc/{process.child.pid}/exe")),
                         ),
                     ),
                     patch(
@@ -458,7 +485,9 @@ class NativeProcessTests(unittest.TestCase):
                     process,
                     "sample",
                     side_effect=FileNotFoundError(
-                        errno.ENOENT, "missing", f"/proc/{process.child.pid}/exe"
+                        errno.ENOENT,
+                        "missing",
+                        str(Path(f"/proc/{process.child.pid}/exe")),
                     ),
                 ),
                 patch(
@@ -496,7 +525,7 @@ class NativeProcessTests(unittest.TestCase):
                 ):
                     if (
                         resource == "status"
-                        and str(path) == f"/proc/{process.child.pid}/status"
+                        and path.as_posix() == f"/proc/{process.child.pid}/status"
                     ):
                         return "Name:	selected core\n"
                     return original_read(path, *args, **kwargs)
@@ -510,7 +539,7 @@ class NativeProcessTests(unittest.TestCase):
                 ):
                     if (
                         resource == "exe"
-                        and str(path) == f"/proc/{process.child.pid}/exe"
+                        and path.as_posix() == f"/proc/{process.child.pid}/exe"
                     ):
                         raise FileNotFoundError(errno.ENOENT, "released", str(path))
                     return original_stat(path, *args, **kwargs)

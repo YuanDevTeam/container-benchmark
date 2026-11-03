@@ -1,5 +1,6 @@
 """Offline official-release cache/extraction checks; never execute native peers."""
 
+import os
 import stat
 import struct
 import tempfile
@@ -10,11 +11,14 @@ from pathlib import Path
 from unittest.mock import patch
 
 from container_benchmark import download_cache
+from container_benchmark import guest_architecture as arch
 from container_benchmark.interop import mihomo_lab as lab
 from container_benchmark.interop import native_peer_releases as releases
 
 
-def elf(machine=183):
+def elf(machine=None):
+    if machine is None:
+        machine = arch.elf_machine()
     header = bytearray(64)
     header[:7] = b"\x7fELF\x02\x01\x01"
     struct.pack_into("<HH", header, 16, 2, machine)
@@ -40,7 +44,7 @@ class NativePeerReleasesTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             resolved = release_record(
-                "XTLS/Xray-core", "v99.1.2", ["Xray-linux-arm64-v8a.zip"]
+                "XTLS/Xray-core", "v99.1.2", [f"Xray-linux-{arch.v2ray_arch()}.zip"]
             )
 
             def download(url, path, *, limit):
@@ -69,7 +73,9 @@ class NativePeerReleasesTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             resolved = release_record(
-                "apernet/hysteria", "app/v99.1.2", ["hysteria-linux-arm64"]
+                "apernet/hysteria",
+                "app/v99.1.2",
+                ["hysteria-linux-" + arch.architecture()],
             )
             first_run, second_run = (
                 root / name / "pressure-peers" for name in ("one", "two")
@@ -77,7 +83,12 @@ class NativePeerReleasesTests(unittest.TestCase):
             for run in (first_run, second_run):
                 run.mkdir(parents=True)
                 (run.parent / "artifacts").mkdir()
-                (run / "artifacts").symlink_to("../artifacts", target_is_directory=True)
+                if os.name == "nt":
+                    (run / "artifacts").mkdir()
+                else:
+                    (run / "artifacts").symlink_to(
+                        "../artifacts", target_is_directory=True
+                    )
             with (
                 patch.object(download_cache, "CACHE_ROOT", root / "cache"),
                 patch.object(releases, "latest_release", return_value=resolved),
@@ -97,7 +108,10 @@ class NativePeerReleasesTests(unittest.TestCase):
             self.assertNotEqual(
                 cached.stat().st_ino, (second_run / "artifacts/hysteria2").stat().st_ino
             )
-            self.assertTrue((second_run / "artifacts/hysteria2").stat().st_mode & 0o111)
+            if os.name != "nt":
+                self.assertTrue(
+                    (second_run / "artifacts/hysteria2").stat().st_mode & 0o111
+                )
 
     def test_xray_missing_or_duplicate_expected_binary_fails(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -136,10 +150,15 @@ class NativePeerReleasesTests(unittest.TestCase):
     def test_wrong_platform_and_error_page_are_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             binary = Path(directory) / "native"
-            for content in (elf(62), b"error page", b"", b"x" * 128):
+            for content in (
+                elf(183 if arch.elf_machine() == 62 else 62),
+                b"error page",
+                b"",
+                b"x" * 128,
+            ):
                 with self.subTest(content=content[:8]):
                     binary.write_bytes(content)
-                    with self.assertRaisesRegex(ValueError, "Linux ARM64 ELF"):
+                    with self.assertRaisesRegex(ValueError, "Linux .* ELF"):
                         releases._check_binary(binary)
 
 

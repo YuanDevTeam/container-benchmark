@@ -2,6 +2,7 @@
 
 import io
 import json
+import os
 import struct
 import tempfile
 import unittest
@@ -109,7 +110,8 @@ class HttpGenerationsTests(unittest.TestCase):
             root = Path(directory)
             identity_files(root)
             path = private_ca_file(root / "private.json", root / "cert2")
-            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            if os.name != "nt":
+                self.assertEqual(path.stat().st_mode & 0o777, 0o600)
             self.assertEqual(
                 json.loads(path.read_text()),
                 {

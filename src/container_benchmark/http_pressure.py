@@ -15,9 +15,10 @@ from types import SimpleNamespace
 
 from . import core_comparison as comparison
 from . import core_vole_adapter, workload
+from .guest_architecture import architecture
 from .http_experience import failure_logs, window_result
 from .http_inputs import private_ca_file
-from .inputs import save, sha256, source_identity
+from .inputs import materialize_input_directory, save, sha256, source_identity
 from .interop.http_processing import certificates
 from .pressure_acceptance import annotate_pressure_case
 
@@ -790,7 +791,7 @@ def run(source, binary, output, selected):
                 ],
                 root / "artifacts/http-build.log",
                 env=os.environ
-                | {"GOOS": "linux", "GOARCH": "arm64", "CGO_ENABLED": "0"},
+                | {"GOOS": "linux", "GOARCH": architecture(), "CGO_ENABLED": "0"},
                 timeout=180,
             )
             report["http_driver_sha256"] = sha256(
@@ -852,9 +853,7 @@ def run(source, binary, output, selected):
                         raise ValueError("HTTP source/binary changed between windows")
                     job = root / name
                     job.mkdir()
-                    (job / "artifacts").symlink_to(
-                        "../artifacts", target_is_directory=True
-                    )
+                    materialize_input_directory(root / "artifacts", job / "artifacts")
                     failure = None
                     print(
                         "HTTP pressure " + name + ": 64 flows / 60 seconds", flush=True

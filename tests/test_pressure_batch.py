@@ -1,4 +1,5 @@
 import json
+import os
 import tempfile
 import unittest
 from contextlib import ExitStack
@@ -50,6 +51,30 @@ class BatchTests(unittest.TestCase):
             for command in owner.start.call_args.args[0]
             if any(argument.endswith("/" + binary) for argument in command["argv"])
         ]
+
+    @unittest.skipUnless(os.name == "nt", "Windows copies replace POSIX shared links")
+    def test_windows_profile_inputs_are_private_copies_with_original_bytes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            owner = self.owner(Path(temporary) / "pressure-peers")
+            artifact = owner.root / "artifacts/tool"
+            artifact.write_bytes(b"owned executable input")
+            source_certificate = owner.root / "peer/cert.pem"
+            original_certificate = source_certificate.read_bytes()
+            profile = catalogue()["vless-tcp-tls"]
+            with pressure_batch.serving(owner, [profile]):
+                copied = owner.root / "profiles" / profile.name
+                self.assertFalse((copied / "artifacts").is_symlink())
+                self.assertFalse((copied / "peer/cert.pem").is_symlink())
+                self.assertEqual(
+                    (copied / "artifacts/tool").read_bytes(), artifact.read_bytes()
+                )
+                self.assertEqual(
+                    (copied / "peer/cert.pem").read_bytes(), original_certificate
+                )
+                (copied / "artifacts/tool").write_bytes(b"private artifact mutation")
+                (copied / "peer/cert.pem").write_bytes(b"private certificate mutation")
+                self.assertEqual(artifact.read_bytes(), b"owned executable input")
+                self.assertEqual(source_certificate.read_bytes(), original_certificate)
 
     def test_direct_does_not_create_a_listener_in_a_mixed_batch(self):
         profiles = catalogue()

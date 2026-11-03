@@ -18,6 +18,8 @@ import sys
 import time
 from pathlib import Path
 
+from ..container_backend import ensure_runtime
+from ..container_resources import MEMORY_BYTES
 from ..paths import FIXTURE_ROOT as BENCHMARK_FIXTURE_ROOT
 from ..server_selection import selection as select_peer
 from .mihomo_lab import save, sha256
@@ -1335,6 +1337,7 @@ def run(protocols=PROTOCOLS, *, backends=BACKENDS, list_only=False, source_dir=N
         return
     if source_dir is None:
         raise ValueError("Vole interoperability requires an explicit source checkout")
+    ensure_runtime()
     from .mihomo_lab import (
         Guest,
         Session,
@@ -1352,7 +1355,7 @@ def run(protocols=PROTOCOLS, *, backends=BACKENDS, list_only=False, source_dir=N
                 "representative TCP/UDP and native supplementary interoperability, "
                 "not exhaustive field/fingerprint acceptance"
             ),
-            "inputs": {"cpus": 5, "memory_bytes": 8 * 1024**3, "network": "NAT"},
+            "inputs": {"cpus": 5, "memory_bytes": MEMORY_BYTES, "network": "NAT"},
             "cases": [],
             "phase": "source-identity",
             "requested_cases": [case["id"] for case in selected],

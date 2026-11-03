@@ -19,6 +19,7 @@ import uuid
 from pathlib import Path
 
 from ..download_cache import daily
+from ..guest_architecture import architecture
 from ..paths import FIXTURE_ROOT
 from ..peer_binary_cache import module_versions
 from .mihomo_lab import CACHE, download, save, sha256
@@ -124,9 +125,9 @@ def prepare(root):
             item
             for item in release["files"]
             if item.get("os") == "linux"
-            and item.get("arch") == "arm64"
+            and item.get("arch") == architecture()
             and item.get("kind") == "archive"
-            and item.get("filename") == version + ".linux-arm64.tar.gz"
+            and item.get("filename") == version + f".linux-{architecture()}.tar.gz"
         ]
         if len(packages) != 1 or not re.fullmatch(
             r"[0-9a-f]{64}", packages[0].get("sha256", "")
@@ -139,7 +140,7 @@ def prepare(root):
             "url": "https://go.dev/dl/" + package["filename"],
         }
 
-    toolchain = daily("masque-go-stable-linux-arm64", resolve)
+    toolchain = daily("masque-go-stable-linux-" + architecture(), resolve)
 
     def fetch(staging):
         archive = staging / "go.tar.gz"
@@ -161,7 +162,7 @@ def prepare(root):
         return {"archive_sha256": toolchain["archive_sha256"]}
 
     archive = daily(
-        "masque-go-linux-arm64:" + toolchain["archive_sha256"],
+        "masque-go-linux-" + architecture() + ":" + toolchain["archive_sha256"],
         fetch,
         directory=root,
         immutable=True,

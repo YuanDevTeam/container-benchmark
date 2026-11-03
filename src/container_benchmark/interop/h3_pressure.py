@@ -10,6 +10,7 @@ import shutil
 import tarfile
 from pathlib import Path
 
+from ..guest_architecture import architecture
 from ..releases import latest_release, release_asset
 from . import mihomo_interop, mihomo_lab
 from .native_peer_releases import _check_binary, _copy_cached, official_xray
@@ -65,7 +66,7 @@ def official_dnsproxy(root):
     repo = "AdguardTeam/dnsproxy"
     resolved = latest_release(repo)
     tag = resolved["release"]
-    name = f"dnsproxy-linux-arm64-{tag}.tar.gz"
+    name = f"dnsproxy-linux-{architecture()}-{tag}.tar.gz"
     url = release_asset(repo, resolved, name)
     asset = next(a for a in resolved["assets"] if a["name"] == name)
 
@@ -94,7 +95,7 @@ def official_dnsproxy(root):
             "url": url,
             "archive_sha256": digest,
             "binary_sha256": mihomo_lab.sha256(binary),
-            "architecture": "linux-arm64",
+            "architecture": "linux-" + architecture(),
         }
 
     return _copy_cached(

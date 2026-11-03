@@ -88,7 +88,10 @@ class TcpOptionsTests(unittest.TestCase):
                     )
 
                 guest = SimpleNamespace(root=root, record={}, execute=execute)
-                with patch.object(tcp_options, "sha256", return_value="frozen"):
+                with (
+                    patch.object(tcp_options, "architecture", return_value="arm64"),
+                    patch.object(tcp_options, "sha256", return_value="frozen"),
+                ):
                     if enabled:
                         with (
                             self.assertRaisesRegex(RuntimeError, "readback failed"),
@@ -104,6 +107,7 @@ class TcpOptionsTests(unittest.TestCase):
     def test_module_preflight_checks_registration_without_tcp_close_sockopts(self):
         with (
             patch.object(tcp_options, "isolated"),
+            patch.object(Path, "resolve", lambda path: path),
             patch.object(
                 tcp_options.os,
                 "uname",
@@ -111,6 +115,7 @@ class TcpOptionsTests(unittest.TestCase):
                     machine="aarch64",
                     release=tcp_options.KERNEL,
                 ),
+                create=True,
             ),
             patch.object(
                 tcp_options, "module_identity", return_value={"sha256": "frozen"}
@@ -120,6 +125,7 @@ class TcpOptionsTests(unittest.TestCase):
                 Path, "read_text", side_effect=["bbr\n", "reno bbr brutal\n", "bbr\n"]
             ),
             patch.object(tcp_options.os, "open", return_value=42),
+            patch.object(tcp_options.os, "O_CLOEXEC", 0x80000, create=True),
             patch.object(tcp_options.os, "close"),
             patch.object(tcp_options, "syscall") as call,
             patch.object(tcp_options, "save") as save,
@@ -289,6 +295,12 @@ class TcpOptionsTests(unittest.TestCase):
             patch.object(tcp_options, "process_identity", return_value=(1, 2, 3)),
             patch.object(Path, "iterdir", return_value=[Path("/proc/42/fd/7")]),
             patch.object(tcp_options.os, "pidfd_open", return_value=6, create=True),
+            patch.object(
+                tcp_options.os,
+                "uname",
+                return_value=SimpleNamespace(release="synthetic-kernel"),
+                create=True,
+            ),
             patch.object(tcp_options.os, "close"),
             patch.object(tcp_options.os, "readlink", return_value="socket:[123]"),
             patch.object(
@@ -332,7 +344,7 @@ class TcpOptionsTests(unittest.TestCase):
             patch.object(
                 Path, "open", side_effect=[source, PermissionError("unavailable")]
             ),
-            patch.object(tcp_options.os, "sysconf", return_value=4096),
+            patch.object(tcp_options.os, "sysconf", return_value=4096, create=True),
         ):
             result = tcp_options.socket_memory_snapshot()
         source.read.assert_called_once_with(4096)

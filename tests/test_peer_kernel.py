@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, patch
 
 from container_benchmark import core_comparison, linux_builder, pressure_peers, workload
+from container_benchmark import guest_architecture as arch
 from container_benchmark import pressure_campaign as campaign
 
 
@@ -60,7 +61,7 @@ class PeerKernelTests(unittest.TestCase):
         ):
             core_comparison.parse_args(["--list", "--peer-kernel", str(self.kernel)])
 
-    def guest_commands(self, *, uname="7.3.0-test", mutate=False):
+    def guest_commands(self, *, uname="7.3.0-test", mutate=False, machine=None):
         calls = []
 
         def command(action, *arguments, **_kwargs):
@@ -72,7 +73,7 @@ class PeerKernelTests(unittest.TestCase):
                             "configuration": {
                                 "resources": {
                                     "cpus": 5,
-                                    "memoryInBytes": 8 * 1024**3,
+                                    "memoryInBytes": 4 * 1024**3,
                                 }
                             },
                             "status": {
@@ -87,6 +88,17 @@ class PeerKernelTests(unittest.TestCase):
                 if mutate:
                     self.kernel.write_bytes(b"changed kernel")
                 return uname
+            if action == "exec" and arguments[-2:] == ("/bin/uname", "-m"):
+                return arch.machine_name() if machine is None else machine
+            if action == "exec" and arguments[-1] == "/sys/class/net/eth0/mtu":
+                return "1500"
+            if action == "exec" and arguments[1:3] == ("/bin/sh", "-ec"):
+                return json.dumps(
+                    {
+                        "before": {"all": 1, "default": 1},
+                        "after": {"all": 0, "default": 0},
+                    }
+                )
             if action == "exec":
                 return 'ID=ubuntu\nPRETTY_NAME="Ubuntu 26.04.1 LTS"\nVERSION_ID=26.04\n'
             return ""
@@ -137,9 +149,125 @@ class PeerKernelTests(unittest.TestCase):
             self.root / "default", "ubuntu", network="default"
         ) as guest:
             self.assertEqual(guest.record["kernel_release"], "7.3.0-test")
+            self.assertEqual(guest.record["architecture"], arch.architecture())
+            self.assertEqual(guest.record["machine"], arch.machine_name())
             self.assertNotIn("kernel", guest.record)
         self.assertNotIn("--kernel", calls[0])
-        self.assertEqual(sum("/bin/uname" in call for call in calls), 1)
+        self.assertEqual(sum("/bin/uname" in call for call in calls), 2)
+
+    def test_wrong_guest_machine_closes_before_admitting_the_owned_guest(self):
+        _, command = self.guest_commands(machine="other-architecture")
+        peer = self.guest_context(command)
+        with (
+            self.assertRaisesRegex(RuntimeError, "guest architecture"),
+            linux_builder.LinuxGuest(
+                self.root / "wrong-machine", "ubuntu", network="default"
+            ),
+        ):
+            self.fail("a non-native guest was admitted")
+        peer.stop.assert_called_once()
+
+    def test_windows_runtime_prepares_tun_namespace_but_builders_and_packages_do_not(
+        self,
+    ):
+        _, observed = self.guest_commands()
+        prepared = []
+        state = {
+            "before": {"all": 1, "default": 1},
+            "after": {"all": 0, "default": 0},
+        }
+        actual_memory = 4 * 1024**3
+
+        def command(action, *arguments, **kwargs):
+            if action == "inspect":
+                result = json.loads(observed(action, *arguments, **kwargs))
+                result[0]["configuration"]["resources"]["memoryInBytes"] = actual_memory
+                return json.dumps(result)
+            if action == "exec" and arguments[1:3] == ("/bin/sh", "-ec"):
+                prepared.append(arguments[0])
+                return json.dumps(state)
+            return observed(action, *arguments, **kwargs)
+
+        peer = self.guest_context(command)
+        with patch.object(linux_builder.platform, "system", return_value="Windows"):
+            for role, expected in (
+                ("core", True),
+                ("origin", True),
+                ("protocol-peer", True),
+                ("builder", False),
+                ("packages", False),
+                ("helper-builder", False),
+            ):
+                with self.subTest(role=role):
+                    peer.record.clear()
+                    prepared.clear()
+                    actual_memory = linux_builder.allocation(role)[1]
+                    with linux_builder.LinuxGuest(
+                        self.root / role, "ubuntu", network="default", role=role
+                    ) as guest:
+                        self.assertEqual(prepared, [guest.name] if expected else [])
+                        if expected:
+                            self.assertEqual(guest.record["tun_namespace"], state)
+                        else:
+                            self.assertNotIn("tun_namespace", guest.record)
+
+    def test_windows_tun_namespace_failure_closes_before_admitting_runtime(self):
+        _, observed = self.guest_commands()
+
+        def command(action, *arguments, **kwargs):
+            if action == "exec" and arguments[1:3] == ("/bin/sh", "-ec"):
+                return json.dumps(
+                    {
+                        "before": {"all": 1, "default": 1},
+                        "after": {"all": 1, "default": 0},
+                    }
+                )
+            return observed(action, *arguments, **kwargs)
+
+        peer = self.guest_context(command)
+        with (
+            patch.object(linux_builder.platform, "system", return_value="Windows"),
+            self.assertRaisesRegex(RuntimeError, "IPv6"),
+            linux_builder.LinuxGuest(
+                self.root / "invalid-ipv6", "ubuntu", network="default"
+            ),
+        ):
+            self.fail("an unprepared TUN namespace was admitted")
+        peer.stop.assert_called_once()
+
+    def test_windows_guest_reads_actual_interface_mtu_without_inspect_mtu(self):
+        _, observed = self.guest_commands()
+        readbacks = []
+        actual_mtu = "1500"
+
+        def command(action, *arguments, **kwargs):
+            if action == "inspect":
+                state = json.loads(observed(action, *arguments, **kwargs))
+                del state[0]["status"]["networks"][0]["mtu"]
+                return json.dumps(state)
+            if action == "exec" and arguments[-1] == "/sys/class/net/eth0/mtu":
+                readbacks.append(actual_mtu)
+                return actual_mtu
+            return observed(action, *arguments, **kwargs)
+
+        peer = self.guest_context(command)
+        with patch.object(linux_builder.platform, "system", return_value="Windows"):
+            with linux_builder.LinuxGuest(
+                self.root / "windows", "ubuntu", network="default"
+            ) as guest:
+                self.assertEqual(guest.record["mtu"], 1500)
+            for actual_mtu in ("1492", "unavailable"):
+                with (
+                    self.assertRaisesRegex(RuntimeError, "MTU"),
+                    linux_builder.LinuxGuest(
+                        self.root / ("windows-" + actual_mtu),
+                        "ubuntu",
+                        network="default",
+                    ),
+                ):
+                    self.fail("an unverified MTU was admitted")
+        self.assertEqual(readbacks, ["1500", "1492", "unavailable"])
+        self.assertEqual(peer.stop.call_count, 3)
 
     def test_changed_kernel_or_unavailable_actual_release_closes_the_owned_guest(self):
         for uname, mutate in (("", False), ("7.3.0-test", True)):
@@ -214,6 +342,8 @@ class PeerKernelTests(unittest.TestCase):
 
     def test_peer_lab_passes_kernel_only_to_its_protocol_peer(self):
         from container_benchmark.interop import masque_interop
+
+        (self.root / "artifacts").mkdir()
 
         class StopBeforeStarting(Exception):
             pass

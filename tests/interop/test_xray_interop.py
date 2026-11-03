@@ -4,6 +4,7 @@ import base64
 import contextlib
 import io
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -260,7 +261,9 @@ class XrayInteropTests(unittest.TestCase):
             self.assertTrue(listener["allow-insecure"])
             self.assertFalse(listener["mux-option"]["padding"])
             for path in (topology["config_path"], decoder_path):
-                self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+                self.assertIsInstance(json.loads(path.read_text()), dict)
+                if os.name != "nt":
+                    self.assertEqual(path.stat().st_mode & 0o777, 0o600)
         for case, inbound in zip(selected, config["inbounds"], strict=True):
             with self.subTest(case=case["id"]):
                 if not case.get("decoder"):

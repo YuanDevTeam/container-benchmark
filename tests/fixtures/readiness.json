@@ -1,0 +1,30 @@
+[
+  {
+    "complete": true,
+    "probe": true,
+    "entrypoint": "linux-real-tun",
+    "driver_exit_code": 0,
+    "flows": [
+      {"transport": "tcp", "direction": "up", "source_verified": true,
+       "sent": {"bytes": 32, "sha256": "fixture-digest"},
+       "received": {"bytes": 32, "sha256": "fixture-digest"}},
+      {"transport": "tcp", "direction": "down", "source_verified": true,
+       "sent": {"bytes": 32, "sha256": "fixture-digest"},
+       "received": {"bytes": 32, "sha256": "fixture-digest"}}
+    ]
+  },
+  {
+    "complete": true,
+    "probe": true,
+    "entrypoint": "linux-real-tun",
+    "driver_exit_code": 0,
+    "flows": [
+      {"transport": "tcp", "direction": "up", "source_verified": true,
+       "sent": {"bytes": 32, "sha256": "fixture-digest"},
+       "received": {"bytes": 32, "sha256": "fixture-digest"}},
+      {"transport": "tcp", "direction": "down", "source_verified": true,
+       "sent": {"bytes": 32, "sha256": "fixture-digest"},
+       "received": {"bytes": 32, "sha256": "fixture-digest"}}
+    ]
+  }
+]

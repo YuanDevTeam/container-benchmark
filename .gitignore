@@ -1,0 +1,38 @@
+# Shared downloads, build dependencies and daily update metadata.
+/.cache/
+
+# Per-run inputs, certificates, binaries and logs (including interop runs).
+/.work/
+
+# Local text evidence; publish only reviewed summaries in README.md.
+/conclusions/
+
+# Python environments, caches and coverage.
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Packaging outputs are root-local; do not hide source directories named build/dist.
+/build/
+/dist/
+*.egg-info/
+
+# Cargo build directories; normal C/Go binaries are already covered by /.work/.
+target/
+
+# Local credentials and editor / OS temporary files.
+.env
+.env.*
+!.env.example
+!.env.template
+.DS_Store
+._*
+*.swp
+*.swo
+*~

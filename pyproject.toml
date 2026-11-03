@@ -1,0 +1,22 @@
+[project]
+name = "container-benchmark"
+version = "0.1.0"
+description = "Matched native-TUN proxy-core performance comparisons"
+requires-python = ">=3.11"
+dependencies = ["hpack>=4.1,<5"]
+
+[project.scripts]
+container-benchmark = "container_benchmark.cli:main"
+
+[dependency-groups]
+dev = ["ruff>=0.15,<0.16"]
+
+[build-system]
+requires = ["uv_build>=0.12,<0.13"]
+build-backend = "uv_build"
+
+[tool.ruff]
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]

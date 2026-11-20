@@ -23,6 +23,26 @@ def readiness_rows():
 
 
 class ComparisonTests(unittest.TestCase):
+    def test_phase_memory_keeps_missing_rss_reference_unavailable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "timeline.jsonl"
+            rows = [
+                {"monotonic_ns": 1_000_000_000, "rss": None},
+                {"monotonic_ns": 2_000_000_000, "rss": 12345},
+            ]
+            path.write_text("\n".join(json.dumps(row) for row in rows))
+            result = comparison._phase_memory(path, 0, 60)
+            self.assertTrue(result["available"])
+            self.assertEqual(result["unavailable_samples"], 1)
+            self.assertEqual(result["peak_bytes"]["baseline"], 12345)
+            rows[1]["rss"] = None
+            path.write_text("\n".join(json.dumps(row) for row in rows))
+            result = comparison._phase_memory(path, 0, 60)
+            self.assertFalse(result["available"])
+            self.assertTrue(
+                all(value is None for value in result["peak_bytes"].values())
+            )
+
     def test_invalid_optimization_ledger_fails_before_session_resources(self):
         with (
             patch.object(
@@ -524,6 +544,7 @@ class ComparisonTests(unittest.TestCase):
                     },
                     "traffic_sha256": hashlib.sha256(b"traffic ELF").hexdigest(),
                     "queue_length": 4096,
+                    "client_execution": comparison.linux_client_execution(),
                 },
             )
             (assets / "geoip.dat").write_bytes(b"changed input")
@@ -1292,13 +1313,13 @@ class ComparisonTests(unittest.TestCase):
                         },
                     )
 
-    def test_pressure_targets_use_final_peak_and_inclusive_cap(self):
+    def test_linux_memory_is_reference_only_independent_of_rss(self):
         for status, peak, passed in (
-            ("PASS", 45 * 1024**2 + 1, False),
+            ("PASS", 45 * 1024**2 + 1, True),
             ("PASS", 45 * 1024**2, True),
             ("PASS", 45 * 1024**2 - 1, True),
             ("PASS", 43 * 1024**2, True),
-            ("PASS", 0, False),
+            ("PASS", None, True),
             ("ERROR", 43 * 1024**2, False),
         ):
             with self.subTest(status=status, peak=peak):
@@ -1338,7 +1359,7 @@ class ComparisonTests(unittest.TestCase):
                 comparison._annotate_pressure_targets(report)
                 case = report["cases"][0]
                 self.assertEqual(case["peak_bytes"], peak)
-                self.assertEqual(case["memory_limit_met"], passed)
+                self.assertIsNone(case["memory_limit_met"])
                 self.assertIsNone(case["udp_loss_target_met"])
                 self.assertEqual(case["udp_loss_rate"], 0.005)
                 self.assertEqual(case["pressure_met"], passed)

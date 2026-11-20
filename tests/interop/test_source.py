@@ -17,6 +17,74 @@ from container_benchmark.interop import mihomo_lab as lab
 
 
 class SourceTests(unittest.TestCase):
+    def setUp(self):
+        self.kernel_binding = {"frozen": {"expectedRelease": "7.3.1-test"}}
+        self.prepare_kernel = self.enterContext(
+            patch.object(lab, "prepare_guest_kernel", return_value=self.kernel_binding)
+        )
+        self.enterContext(
+            patch.object(lab, "kernel_arguments", return_value=["--kernel", "/Image"])
+        )
+        self.enterContext(patch.object(lab, "kernel_mount_arguments", return_value=[]))
+        self.verify_kernel = self.enterContext(patch.object(lab, "verify_guest_kernel"))
+        self.verify_image = self.enterContext(
+            patch.object(lab, "verify_prepared_guest")
+        )
+
+    @staticmethod
+    def runtime_command(*arguments, **_kwargs):
+        if arguments[0] == "inspect":
+            return json.dumps(
+                [
+                    {
+                        "configuration": {
+                            "resources": {
+                                "cpus": 5,
+                                "memoryInBytes": 4 * 1024**3,
+                            }
+                        },
+                        "status": {
+                            "networks": [
+                                {"ipv4Address": "192.0.2.1/24"},
+                            ]
+                        },
+                    }
+                ]
+            )
+        if arguments[-2:] == ("/bin/uname", "-m"):
+            return arch.machine_name()
+        if arguments[-2:] == ("/bin/uname", "-r"):
+            return "7.3.1-test"
+        if arguments[-1] == "/sys/class/net/eth0/mtu":
+            return "1500"
+        if arguments[-1] == "/etc/os-release":
+            return 'ID=ubuntu\nPRETTY_NAME="Ubuntu 26.04 LTS"\nVERSION_ID=26.04\n'
+        return ""
+
+    def test_kernel_baseline_failure_stops_all_guest_roles_before_launch(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            cache = root / "cache"
+            cache.mkdir()
+            session = SimpleNamespace(
+                work=root, source_dir=None, run_id="offline", guests=[]
+            )
+            self.prepare_kernel.side_effect = RuntimeError("stable kernel unavailable")
+            with (
+                patch.object(lab, "CACHE", cache),
+                patch.object(lab, "command") as operation,
+            ):
+                for role in ("builder", "consumer", "peer"):
+                    with (
+                        self.subTest(role=role),
+                        self.assertRaisesRegex(
+                            RuntimeError, "stable kernel unavailable"
+                        ),
+                    ):
+                        lab.Guest(session, "prepared", role).__enter__()
+                operation.assert_not_called()
+            self.verify_image.assert_not_called()
+
     def test_execution_session_checks_runtime_before_allocating_scratch(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -35,6 +103,53 @@ class SourceTests(unittest.TestCase):
                 session.__enter__()
             checked.assert_called_once_with()
             self.assertFalse(scratch.exists())
+
+    def test_module_infrastructure_capability_preserves_case_capability_drops(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            session = SimpleNamespace(
+                work=root, source_dir=None, run_id="offline", guests=[]
+            )
+            for role, added, dropped in (
+                ("peer", (), ()),
+                ("consumer", ("NET_ADMIN", "SYS_ADMIN"), ("NET_RAW",)),
+                ("icmp-peer", ("NET_ADMIN", "NET_RAW"), ("SYS_ADMIN",)),
+            ):
+                with (
+                    self.subTest(role=role),
+                    patch.object(lab, "CACHE", root / "cache" / "interop"),
+                    patch.object(
+                        lab, "command", side_effect=self.runtime_command
+                    ) as operation,
+                ):
+                    guest = lab.Guest(
+                        session,
+                        "prepared",
+                        role,
+                        capabilities=added,
+                        drop_capabilities=dropped,
+                    ).__enter__()
+                arguments = operation.call_args_list[0].args
+                actual_adds = [
+                    arguments[index + 1]
+                    for index, item in enumerate(arguments)
+                    if item == "--cap-add"
+                ]
+                actual_drops = [
+                    arguments[index + 1]
+                    for index, item in enumerate(arguments)
+                    if item == "--cap-drop"
+                ]
+                self.assertEqual(actual_adds, ["SYS_MODULE", *added])
+                self.assertEqual(actual_drops, list(dropped))
+                self.assertEqual(guest.record["baseline_capabilities"], ["SYS_MODULE"])
+                if dropped:
+                    self.assertEqual(guest.record["added_capabilities"], list(added))
+                    self.assertEqual(
+                        guest.record["dropped_capabilities"], list(dropped)
+                    )
+            with self.assertRaisesRegex(ValueError, "unsupported interop"):
+                lab.Guest(session, "prepared", "peer", capabilities=("SYS_MODULE",))
 
     def test_external_crates_share_one_readonly_repository_mount_with_workspace_root(
         self,
@@ -174,6 +289,9 @@ class SourceTests(unittest.TestCase):
             self.assertEqual(arguments[arguments.index("--memory") + 1], "16G")
             self.assertEqual(guest.record["memory_bytes"], 16 * 1024**3)
             self.assertIn("BENCHMARK_INTEROP_WORK=/work", arguments)
+            self.assertEqual(arguments[arguments.index("--kernel") + 1], "/Image")
+            self.assertIs(guest.kernel_environment, self.kernel_binding)
+            self.verify_kernel.assert_called_once()
             self.assertFalse(any("/scripts" in str(arg) for arg in arguments))
 
     def test_builder_cannot_infer_a_missing_source_from_the_parent_directory(self):

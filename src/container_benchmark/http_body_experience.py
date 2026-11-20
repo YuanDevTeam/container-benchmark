@@ -24,6 +24,7 @@ from . import http_experience as host
 from .http_experience_io import CHUNK, IDLE_SLOTS, Wire, pause, schedule
 from .http_inputs import private_ca_file
 from .inputs import save
+from .memory_policy import assess_memory, memory_gate_allows
 from .pressure_acceptance import pressure_targets
 
 TASK_BYTES = 64 * 1024
@@ -843,6 +844,46 @@ def origin_complete(counters, cases):
     )
 
 
+def annotate(report):
+    """Keep Linux memory reference-only after a valid process lifecycle."""
+    from .pressure_acceptance import memory_observation
+
+    measurement = report.get("measurement", {})
+    peak = measurement.get("peak_bytes")
+    memory = assess_memory("linux", memory_observation(measurement))
+    observed = (
+        measurement.get("status") == "PASS"
+        and measurement.get("sampling_errors", []) == []
+        and measurement.get("cleanup") is True
+        and type(measurement.get("samples")) is int
+        and measurement["samples"] > 0
+        and measurement.get("sigint_requested") is True
+        and type(measurement.get("exit_code")) is int
+        and measurement.get("exit_code") in (0, -signal.SIGINT)
+        and measurement.get("forced_signals") == []
+        and report.get("host_tun_preserved") is True
+    )
+    for case in report["cases"]:
+        case.update(
+            peak_bytes=peak,
+            memory_limit_bytes=memory["limitBytes"],
+            memory_limit_met=memory["gateMet"],
+            memory_required=memory["requiredForAcceptance"],
+            memory_policy=memory["policy"],
+            memory_assessment=memory,
+            memory_screening_only=True,
+            device_acceptance_met=None,
+        )
+        case["experience_met"] = bool(
+            case["complete"]
+            and observed
+            and memory_gate_allows(memory)
+            and case["udp_loss_target_met"]
+            and case["dns_completion_met"]
+            and case["socket_witness"]["count_matches"]
+        )
+
+
 def guest(root, name):
     from . import core_comparison as comparison
     from . import core_vole_adapter
@@ -953,33 +994,7 @@ def guest(root, name):
                 process.close()
                 report["host_tun_preserved"] = tun.record()["host_tun_preserved"]
         report["tun"] = tun.record()
-        peak = process.record.get("peak_bytes")
-        observed = (
-            process.record.get("status") == "PASS"
-            and process.record.get("cleanup") is True
-            and process.record.get("samples", 0) > 0
-            and process.record.get("sigint_requested") is True
-            and process.record.get("exit_code") in (0, -signal.SIGINT)
-            and process.record.get("forced_signals") == []
-            and report["host_tun_preserved"] is True
-            and type(peak) is int
-            and peak > 0
-        )
-        for case in report["cases"]:
-            case.update(
-                peak_bytes=peak,
-                memory_limit_bytes=43 * 1024**2,
-                memory_limit_met=bool(observed and peak <= 43 * 1024**2),
-                memory_screening_only=True,
-                device_acceptance_met=None,
-            )
-            case["experience_met"] = bool(
-                case["complete"]
-                and case["memory_limit_met"]
-                and case["udp_loss_target_met"]
-                and case["dns_completion_met"]
-                and case["socket_witness"]["count_matches"]
-            )
+        annotate(report)
         report["status"] = (
             "MEASURED"
             if report["cases"]

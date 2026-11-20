@@ -1,19 +1,22 @@
-"""Shared memory budgets applied to measurements, never device acceptance."""
+"""Platform memory policies and independent pressure evidence gates."""
 
 from __future__ import annotations
 
 import math
 import signal
 
+from .memory_policy import MIB as MIB
+from .memory_policy import assess_memory, memory_gate_allows, policy_for
 from .pressure_optimization import fallback_active, optimization_policy
 
-MIB = 1024**2
 PLATFORMS = {"ios", "tvos", "macos", "windows", "linux", "android"}
+RAW_MIHOMO_METRIC_POLICY = "mihomo-raw-delivery-v1"
 
 
 def pressure_targets(platform: str) -> dict:
     if platform not in PLATFORMS:
         raise ValueError("unsupported pressure platform")
+    policy = policy_for(platform)
     return {
         "platform": platform,
         "throughput_ratio": 0.95,
@@ -24,12 +27,10 @@ def pressure_targets(platform: str) -> dict:
         "udp_loss_rate": 0.01,
         "memory_priority_rates_mbps": [2000, 3000],
         "udp_loss_scope": "packet-weighted up and down; actual sends",
-        "memory_limit_bytes_by_rate_mbps": {
-            1000: 43 * MIB,
-            2000: 45 * MIB,
-            3000: 45 * MIB,
-        },
-        "memory_limit_inclusive": True,
+        "memory_policy": policy,
+        "memory_required": policy["requiredForAcceptance"],
+        "memory_limit_bytes": policy["limitBytes"],
+        "memory_limit_inclusive": policy["inclusive"],
         "acceptance_scope": (
             "benchmark screening; iOS/tvOS require separate whole-extension "
             "physical-footprint acceptance"
@@ -37,8 +38,45 @@ def pressure_targets(platform: str) -> dict:
     }
 
 
+def memory_observation(measurement: dict) -> dict:
+    """Keep observer memory facts independent of its lifecycle/CPU status.
+
+    Missing reference-only memory never becomes zero or a different metric.
+    Existing procfs summaries mix sampled current RSS and captured HWM, so their
+    combined peak is conservatively labelled sampled_max unless the collector
+    explicitly supplies a kernel-lifetime statistic.
+    """
+    peak = measurement.get("peak_bytes")
+    metric = measurement.get("metric")
+    available = (
+        type(peak) is int
+        and peak > 0
+        and isinstance(metric, str)
+        and bool(metric)
+        and measurement.get("memory_available") is not False
+    )
+    return {
+        "metric": metric,
+        "unit": measurement.get("unit"),
+        "peakBytes": peak if type(peak) is int and peak > 0 else None,
+        "peakKind": measurement.get("peak_kind", "sampled_max"),
+        "available": available,
+        "source": measurement.get("peak_sources", []),
+        "scope": measurement.get(
+            "peak_scope", measurement.get("observation_window", "unavailable")
+        ),
+        "samples": measurement.get("memory_samples"),
+        "errors": measurement.get("memory_sampling_errors", []),
+        "collectorStatus": measurement.get("memory_status"),
+    }
+
+
 def _positive_number(value) -> bool:
-    return type(value) in (int, float) and math.isfinite(value) and value > 0
+    return _nonnegative_number(value) and value > 0
+
+
+def _nonnegative_number(value) -> bool:
+    return type(value) in (int, float) and math.isfinite(value) and value >= 0
 
 
 def _axis_status(checks: tuple[bool | None, ...]) -> str:
@@ -135,7 +173,49 @@ def _udp_counts(case: dict) -> tuple[int, int] | None:
     return (sent, sum(row["loss_packets"] for row in rows)) if sent else None
 
 
+def _raw_udp_counts(case: dict) -> tuple[int, int] | None:
+    directions = case.get("raw_direction_packets")
+    if not isinstance(directions, dict):
+        return None
+    total_sent = total_lost = 0
+    for direction in ("up", "down"):
+        row = directions.get(direction)
+        if not isinstance(row, dict):
+            return None
+        sent, received = row.get("sent_packets"), row.get("received_packets")
+        if (
+            type(sent) is not int
+            or type(received) is not int
+            or min(sent, received) < 0
+        ):
+            return None
+        total_sent += sent
+        total_lost += max(0, sent - received)
+    return (total_sent, total_lost) if total_sent else None
+
+
+def _raw_mihomo(case: dict) -> bool:
+    return case.get("reference_metric_policy") == RAW_MIHOMO_METRIC_POLICY
+
+
 def _full_window(case: dict) -> bool:
+    if _raw_mihomo(case):
+        return (
+            case.get("load_window_observed") is True
+            and case.get("active_counters_available") is True
+            and all(
+                type(case.get(key)) is int and case[key] >= 0
+                for key in (
+                    "sent_bytes",
+                    "received_bytes",
+                    "active_sent_bytes",
+                    "active_received_bytes",
+                )
+            )
+            and case["sent_bytes"] > 0
+            and case["active_sent_bytes"] <= case["sent_bytes"]
+            and case["active_received_bytes"] <= case["received_bytes"]
+        )
     return (
         case.get("load_window_observed") is True
         and case.get("active_counters_available") is True
@@ -183,7 +263,7 @@ def performance_reference(case: dict, reference_acceptance: dict | None = None) 
     usable = (
         reference.get("inputs_match") is True
         and reference.get("observations_met") is True
-        and _positive_number(reference.get("goodput_target_mbps"))
+        and _nonnegative_number(reference.get("goodput_target_mbps"))
         and (
             mode == "tcp"
             or (
@@ -197,14 +277,9 @@ def performance_reference(case: dict, reference_acceptance: dict | None = None) 
         target = min(target, reference["goodput_target_mbps"])
         if mode != "tcp":
             loss_target = max(loss_target, reference["udp_loss_target"])
-    throughput_met = (
-        throughput >= target
-        if type(throughput) in (int, float)
-        and math.isfinite(throughput)
-        and throughput >= 0
-        else None
-    )
-    counts = _udp_counts(case) if mode in ("udp", "mixed") else None
+    throughput_met = throughput >= target if _nonnegative_number(throughput) else None
+    udp_counts = _raw_udp_counts if _raw_mihomo(case) else _udp_counts
+    counts = udp_counts(case) if mode in ("udp", "mixed") else None
     udp_loss = counts[1] / counts[0] if counts else None
     udp_met = None
     if counts:
@@ -261,24 +336,24 @@ def annotate_pressure_case(
     platform: str,
     dns_required: bool = True,
 ) -> None:
-    """Apply the shared budget to the final observer, independent of host OS."""
+    """Apply client-platform policy without treating optional RSS as a gate."""
     targets = pressure_targets(platform)
     peak = measurement.get("peak_bytes")
-    observed = (
-        measurement.get("status") == "PASS"
+    memory = assess_memory(
+        platform,
+        memory_observation(measurement),
+        qualified=measurement.get("status") == "PASS"
         and measurement.get("cleanup") is True
-        and type(peak) is int
-        and peak > 0
+        and measurement.get("sampling_errors", []) == [],
     )
     offered = case.get("offered_mbps")
-    cap = (
-        targets["memory_limit_bytes_by_rate_mbps"].get(offered)
-        if type(offered) in (int, float)
-        else None
-    )
+    cap = targets["memory_limit_bytes"]
     case["peak_bytes"] = peak
     case["memory_limit_bytes"] = cap
-    case["memory_limit_met"] = observed and cap is not None and peak <= cap
+    case["memory_limit_met"] = memory["gateMet"]
+    case["memory_required"] = memory["requiredForAcceptance"]
+    case["memory_policy"] = memory["policy"]
+    case["memory_assessment"] = memory
     case["memory_observation_scope"] = measurement.get(
         "peak_scope", measurement.get("observation_window", "unavailable")
     )
@@ -286,7 +361,11 @@ def annotate_pressure_case(
     case["device_acceptance_met"] = None
 
     memory_priority = offered in targets["memory_priority_rates_mbps"]
-    case["acceptance_mode"] = "memory-pressure" if memory_priority else "rate"
+    case["acceptance_mode"] = (
+        ("memory-pressure" if memory["requiredForAcceptance"] else "overload")
+        if memory_priority
+        else "rate"
+    )
     performance = performance_reference(case)
     case["performance_reference"] = performance
     case["throughput_target_mbps"] = performance.get("throughput_target_mbps")
@@ -294,7 +373,9 @@ def annotate_pressure_case(
     case["load_arrival_met"] = _full_window(case)
     case["throughput_target_met"] = performance.get("throughput_met")
     udp_required = case.get("transport", "mixed") != "tcp"
-    counts = _udp_counts(case) if udp_required else None
+    raw_mihomo = _raw_mihomo(case)
+    udp_counts = _raw_udp_counts if raw_mihomo else _udp_counts
+    counts = udp_counts(case) if udp_required else None
     case["udp_loss_rate"] = counts[1] / counts[0] if counts else None
     case["udp_loss_target_met"] = performance.get("udp_loss_met")
     case["tcp_delivery_met"] = (
@@ -315,6 +396,7 @@ def annotate_pressure_case(
     )
     case["stop_observation_met"] = (
         measurement.get("status") == "PASS"
+        and measurement.get("sampling_errors", []) == []
         and measurement.get("cleanup") is True
         and type(measurement.get("samples")) is int
         and measurement["samples"] > 0
@@ -363,7 +445,11 @@ def annotate_pressure_case(
         and (not dns_required or case["dns_target_met"])
     )
     case["pressure_met"] = (
-        delivery_met and case["memory_limit_met"] and case["stop_observation_met"]
+        None
+        if raw_mihomo
+        else delivery_met
+        and memory_gate_allows(memory)
+        and case["stop_observation_met"]
     )
     case["integrity"] = pressure_integrity(case)
 
@@ -400,6 +486,14 @@ def annotate_reference_acceptance(
         "strict_status": "NOT_RUN",
         "optimization_policy": optimization_policy(vole_row, optimization_rounds),
     }
+    memory = assess_memory("linux", memory_observation(vole_row.get("measurement", {})))
+    result.update(
+        memory_policy=memory["policy"],
+        memory_assessment=memory,
+        memory_required=memory["requiredForAcceptance"],
+        memory_limit_bytes=memory["limitBytes"],
+        memory_met=memory["gateMet"],
+    )
     vole_row["reference_acceptance"] = result
     if reference_row is None:
         result["reason"] = "reference_missing"
@@ -504,9 +598,28 @@ def annotate_reference_acceptance(
             )
         )
 
-    def observed(row, case):
+    def observed(row, case, *, raw_mihomo=False):
+        if raw_mihomo != _raw_mihomo(case):
+            return False
         measurement = row.get("measurement", {})
         tcp = case.get("tcp", {})
+        if raw_mihomo:
+            delivery_observed = _nonnegative_number(case.get("goodput_mbps"))
+        else:
+            delivery_observed = (
+                _positive_number(case.get("goodput_mbps"))
+                and _positive_number(case.get("active_received_bytes"))
+                and (
+                    mode == "udp"
+                    or (
+                        tcp.get("available") is True
+                        and type(tcp.get("sent_bytes")) is int
+                        and tcp["sent_bytes"] > 0
+                        and type(tcp.get("received_bytes")) is int
+                        and tcp["received_bytes"] >= 0
+                    )
+                )
+            )
         return (
             row.get("status") == "MEASURED"
             and row.get("peer_health_valid") is not False
@@ -515,38 +628,15 @@ def annotate_reference_acceptance(
             and case.get("offered_mbps") == 1000
             and case.get("load_seconds") == workload["seconds"]
             and case.get("flows") == workload["flows"]
-            and all(
-                case.get(key) is True
-                for key in ("load_window_observed", "active_counters_available")
-            )
-            and all(
-                _positive_number(case.get(key))
-                for key in (
-                    "goodput_mbps",
-                    "active_sent_bytes",
-                    "active_received_bytes",
-                    "actual_seconds",
-                )
-            )
+            and _full_window(case)
+            and _positive_number(case.get("actual_seconds"))
             and case["actual_seconds"] >= workload["seconds"]
-            and (
-                mode == "udp"
-                or (
-                    tcp.get("available") is True
-                    and type(tcp.get("sent_bytes")) is int
-                    and tcp["sent_bytes"] > 0
-                    and type(tcp.get("received_bytes")) is int
-                    and tcp["received_bytes"] >= 0
-                )
-            )
+            and delivery_observed
             and measurement.get("status") == "PASS"
             and measurement.get("sampling_errors", []) == []
-            and measurement.get("metric") == "rss"
             and measurement.get("cleanup") is True
             and type(measurement.get("samples")) is int
             and measurement["samples"] > 0
-            and type(measurement.get("peak_bytes")) is int
-            and measurement["peak_bytes"] > 0
             and measurement.get("sigint_requested") is True
             and measurement.get("exited_before_close") is not True
             and type(measurement.get("exit_code")) is int
@@ -557,16 +647,25 @@ def annotate_reference_acceptance(
             and row["tun"].get("cleanup") is True
         )
 
-    result["observations_met"] = all(
-        observed(row, case)
-        for row, case in ((vole_row, candidate), (reference_row, reference))
+    raw_mihomo = _raw_mihomo(reference)
+    if "reference_metric_policy" in reference and not raw_mihomo:
+        result["reason"] = "unknown_reference_metric_policy"
+        return result
+    reference_udp_counts = _raw_udp_counts if raw_mihomo else _udp_counts
+    right = reference_udp_counts(reference) if mode != "tcp" else None
+    result["observations_met"] = (
+        observed(vole_row, candidate)
+        and observed(reference_row, reference, raw_mihomo=raw_mihomo)
+        and (not raw_mihomo or mode == "tcp" or right is not None)
     )
     result["evidence_met"] = integrity_met(candidate) and result["observations_met"]
     if not result["observations_met"]:
         result["reason"] = "incomplete_or_invalid_measurement"
         return result
-    result["memory_limit_bytes"] = 43 * MIB
-    result["memory_met"] = vole_row["measurement"]["peak_bytes"] <= 43 * MIB
+    if raw_mihomo:
+        result["reference_metric_policy"] = RAW_MIHOMO_METRIC_POLICY
+        result["reference_goodput_mbps"] = reference["goodput_mbps"]
+        result["reference_udp_loss_rate"] = right[1] / right[0] if right else None
     result["goodput_target_mbps"] = min(950.0, reference["goodput_mbps"])
     result["goodput_met"] = candidate["goodput_mbps"] >= result["goodput_target_mbps"]
     cpu = [case.get("cpu_percent") for case in (candidate, reference)]
@@ -581,9 +680,9 @@ def annotate_reference_acceptance(
     }
     result["udp_loss_target"] = None
     result["udp_loss_met"] = True
-    left, right = None, None
+    left = None
     if mode != "tcp":
-        left, right = _udp_counts(candidate), _udp_counts(reference)
+        left = _udp_counts(candidate)
         result["udp_loss_met"] = left is not None and right is not None
         if result["udp_loss_met"]:
             reference_sent, reference_lost = right
@@ -596,10 +695,8 @@ def annotate_reference_acceptance(
     result["strict_udp_loss_met"] = result["udp_loss_met"]
     result["strict_status"] = (
         "PASS"
-        if all(
-            result[key]
-            for key in ("evidence_met", "memory_met", "goodput_met", "udp_loss_met")
-        )
+        if all(result[key] for key in ("evidence_met", "goodput_met", "udp_loss_met"))
+        and memory_gate_allows(memory)
         else "FAIL"
     )
     policy = result["optimization_policy"]
@@ -620,8 +717,7 @@ def annotate_reference_acceptance(
     result["performance_status"] = performance["status"]
     result["reference_performance_status"] = performance_reference(reference)["status"]
     result["met"] = all(
-        result[key]
-        for key in ("evidence_met", "memory_met", "goodput_met", "udp_loss_met")
-    )
+        result[key] for key in ("evidence_met", "goodput_met", "udp_loss_met")
+    ) and memory_gate_allows(memory)
     result["status"] = "PASS" if result["met"] else "FAIL"
     return result

@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import os
 import platform
 import re
-import shlex
-import shutil
 import subprocess
 import tarfile
 import time
@@ -21,47 +20,21 @@ from types import SimpleNamespace
 from . import container_backend
 from .container_resources import CPUS, allocation
 from .containers import (
-    IMAGE,
     NETWORK,
     PURPOSE,
     ContainerPeer,
     command,
     owned_network,
     run_logged,
-    shared_image,
     ubuntu_identity,
 )
 from .download_cache import daily
 from .guest_architecture import architecture, machine_name, rust_target
 from .inputs import save, sha256
 from .paths import BENCHMARK_ROOT, FIXTURE_ROOT
+from .prepared_image import DEPENDENCY_PACKAGES
 
-PACKAGES = (
-    "build-essential",
-    "git",
-    "clang",
-    "libclang-dev",
-    "cmake",
-    "ninja-build",
-    "pkg-config",
-    "perl",
-    "patch",
-    "curl",
-    "ca-certificates",
-    "python3",
-    "python3-hpack",
-    "iproute2",
-    "iptables",
-    "nftables",
-    "wireguard-tools",
-    "procps",
-    "util-linux",
-    "iputils-ping",
-    "file",
-    "xz-utils",
-    "zip",
-    "unzip",
-)
+PACKAGES = DEPENDENCY_PACKAGES
 NATIVE_CACHE_PATH = "/usr/local/vole-native"
 RUST_TARGET = rust_target()
 RUST_ARCHIVE = f"rust-stable-{RUST_TARGET}.tar.xz"
@@ -72,6 +45,32 @@ GUEST_PATH = (
     "/usr/sbin:/usr/bin:/sbin:/bin"
 )
 GUEST_HOSTNAME = "benchmark"
+
+
+def published_ports(specifications):
+    """Normalize explicit manager port mappings before acquiring a guest."""
+    result = []
+    bindings = set()
+    for specification in specifications:
+        if not isinstance(specification, str):
+            raise ValueError("published ports require IPv4:host:container/protocol")
+        match = re.fullmatch(r"([^:]+):([0-9]+):([0-9]+)/(tcp|udp)", specification)
+        if match is None:
+            raise ValueError("published ports require IPv4:host:container/protocol")
+        address, host, container, protocol = match.groups()
+        try:
+            address = str(ipaddress.IPv4Address(address))
+        except ipaddress.AddressValueError as error:
+            raise ValueError("published port host address must be IPv4") from error
+        host, container = int(host), int(container)
+        if not (1 <= host <= 65535 and 1 <= container <= 65535):
+            raise ValueError("published ports must be in 1..65535")
+        binding = (address, host, protocol)
+        if binding in bindings:
+            raise ValueError("duplicate published host port")
+        bindings.add(binding)
+        result.append(f"{address}:{host}:{container}/{protocol}")
+    return tuple(result)
 
 
 def kernel_file_identity(path):
@@ -173,17 +172,19 @@ class LinuxGuest:
         network=NETWORK,
         role="core",
         kernel=None,
+        kernel_manifest=None,
+        publish_ports=(),
     ):
         self.root = Path(root)
         self.image = image
         self.cache = cache
         self.role = role
+        self.publish_ports = published_ports(publish_ports)
         if network not in (NETWORK, "default"):
             raise ValueError("unsupported owned Linux guest network")
         self.network = network
-        if kernel is not None and role != "protocol-peer":
-            raise ValueError("an explicit kernel is limited to protocol-peer guests")
         self.kernel = kernel_file_identity(kernel) if kernel is not None else None
+        self.kernel_manifest = kernel_manifest
         self.resource_arguments, self.memory_bytes = allocation(role)
         self.sources = {
             name: Path(path).resolve(strict=True)
@@ -215,6 +216,7 @@ class LinuxGuest:
         self.lab = SimpleNamespace(run_id=uuid.uuid4().hex[:12], mtu=1500)
         self.peer = ContainerPeer(self.lab, self.root, role)
         self.record = self.peer.record
+        self.record["published_ports"] = list(self.publish_ports)
         self.log_dir = self.root / "containers" / self.peer.name
         self.log_dir.mkdir(parents=True, exist_ok=True)
 
@@ -223,6 +225,39 @@ class LinuxGuest:
         return self.peer.name
 
     def __enter__(self):
+        from .kernel_environment import (
+            kernel_arguments,
+            kernel_mount_arguments,
+            prepare_guest_kernel,
+            verify_guest_kernel,
+            verify_kernel_override,
+        )
+        from .prepared_image import verify_prepared_guest
+
+        # All roles, including dependency/image builders, use the same profile.
+        # Preparation happens before acquiring any guest or network resource.
+        if self.role == "image-builder":
+            if (
+                re.fullmatch(
+                    r"docker\.io/library/ubuntu@sha256:[0-9a-f]{64}", self.image
+                )
+                is None
+            ):
+                raise ValueError(
+                    "image-builder requires the pinned official Ubuntu base"
+                )
+            self.record["bootstrapImage"] = {
+                "ref": self.image,
+                "purpose": "prepare the shared dependency image",
+            }
+        self.kernel_environment = (
+            prepare_guest_kernel(self.log_dir)
+            if self.kernel_manifest is None
+            else prepare_guest_kernel(self.log_dir, manifest=self.kernel_manifest)
+        )
+        if self.kernel is not None:
+            verify_kernel_override(self.kernel_environment, self.kernel["path"])
+        self.kernel = kernel_file_identity(self.kernel_environment["paths"]["image"])
         try:
             if self.kernel is not None:
                 self._check_kernel()
@@ -251,7 +286,12 @@ class LinuxGuest:
                 f"benchmark-run={self.lab.run_id}",
                 "--network",
                 f"{self.network},mtu=1500",
-                *(["--kernel", self.kernel["path"]] if self.kernel else []),
+                *[
+                    argument
+                    for specification in self.publish_ports
+                    for argument in ("--publish", specification)
+                ],
+                *kernel_arguments(self.kernel_environment),
                 *self.resource_arguments,
                 "--arch",
                 architecture(),
@@ -269,6 +309,7 @@ class LinuxGuest:
                 f"type=bind,source={self.root},target=/run/benchmark",
                 "--mount",
                 f"type=bind,source={BENCHMARK_ROOT},target=/src/benchmark,readonly",
+                *kernel_mount_arguments(self.kernel_environment),
                 *[
                     argument
                     for name, host in self.sources.items()
@@ -312,6 +353,9 @@ class LinuxGuest:
                 network_mode="nat-build-only" if self.network == "default" else "nat",
             )
             state = json.loads(command("inspect", self.name))[0]
+            self.record["published_ports_observed"] = state["configuration"].get(
+                "publishedPorts"
+            )
             resources = state["configuration"]["resources"]
             self.record.update(
                 cpus=resources["cpus"], memory_bytes=resources["memoryInBytes"]
@@ -342,6 +386,11 @@ class LinuxGuest:
             if self.kernel is not None:
                 self.record["kernel"]["uname_release"] = release
                 self._check_kernel()
+            verify_guest_kernel(
+                self.kernel_environment, self.execute, self.record, self.log_dir
+            )
+            if self.role != "image-builder":
+                verify_prepared_guest(self)
             network = state["status"]["networks"][0]
             if platform.system() == "Windows":
                 observed_mtu = command(
@@ -366,8 +415,30 @@ class LinuxGuest:
                 if namespace is not None:
                     self.record["tun_namespace"] = namespace
             return self
-        except BaseException:
-            self.peer.stop()
+        except BaseException as primary:
+            self.record["startup_error"] = {"kind": type(primary).__name__}
+            boot_log = self.log_dir / "boot-failure.log"
+            boot_record = {"path": str(boot_log), "captured": False}
+            self.record["boot_failure_log"] = boot_record
+            try:
+                arguments = (
+                    ["logs", "--tail", "120", self.name]
+                    if container_backend.is_windows()
+                    else ["logs", "--boot", "-n", "120", self.name]
+                )
+                text = command(*arguments, timeout=5)
+                boot_log.write_bytes(text.encode()[-65536:])
+                boot_record.update(captured=True, bytes=boot_log.stat().st_size)
+            except BaseException as failure:
+                kind = type(failure).__name__
+                boot_record["error"] = {"kind": kind}
+                primary.add_note("Owned guest boot log capture failed: " + kind)
+            try:
+                self.peer.stop()
+            except BaseException as failure:
+                kind = type(failure).__name__
+                self.record["startup_cleanup_error"] = {"kind": kind}
+                primary.add_note("Owned guest startup cleanup failed: " + kind)
             raise
 
     def _check_kernel(self):
@@ -409,67 +480,16 @@ class LinuxGuest:
 
 
 def builder_inputs(root):
-    """Refresh official image/deb identities once daily; never cache candidate code."""
+    """Freeze one reusable image with all public build/runtime dependencies."""
+    from .prepared_image import ensure_prepared_image
+
     container_backend.ensure_runtime()
-    image = shared_image(IMAGE, root / "builder-image.log")
-    pinned = IMAGE.rsplit(":", 1)[0] + "@" + image["digest"]
-
-    def prepare(staging):
-        refresh = root / "tool-refresh"
-        refresh.mkdir()
-        with LinuxGuest(refresh, pinned, cache=staging, network="default") as guest:
-            guest.execute(
-                ["apt-get", "update"], refresh / "apt-update.log", timeout=300
-            )
-            guest.execute(
-                ["mkdir", "-m", "0755", "-p", "/tmp/benchmark-apt"],
-                refresh / "apt-cache.log",
-                timeout=30,
-            )
-            guest.execute(
-                [
-                    "apt-get",
-                    "-o",
-                    "Dir::Cache::archives=/tmp/benchmark-apt",
-                    "install",
-                    "--yes",
-                    "--no-install-recommends",
-                    "--download-only",
-                    *PACKAGES,
-                ],
-                refresh / "apt-download.log",
-                timeout=600,
-            )
-            guest.execute(
-                ["/bin/sh", "-ec", "cp /tmp/benchmark-apt/*.deb /cache/"],
-                refresh / "apt-cache-copy.log",
-                timeout=180,
-            )
-        for path in list(staging.iterdir()):
-            if path.suffix != ".deb":
-                if path.is_dir():
-                    shutil.rmtree(path)
-                else:
-                    path.unlink()
-        files = sorted(path.name for path in staging.glob("*.deb"))
-        if not files:
-            raise RuntimeError("Linux builder package snapshot is empty")
-        return {"image": image["digest"], "packages": files}
-
-    packages = daily(
-        "linux-builder-debs:"
-        + architecture()
-        + ":"
-        + image["digest"]
-        + ":"
-        + ",".join(PACKAGES),
-        prepare,
-        directory=root / "builder-tools",
-    )
+    pinned, image = ensure_prepared_image(Path(root))
+    save(Path(root) / "builder-image.json", image)
     return pinned, {
         "image": image,
-        "packages": packages,
-        "toolchain": rust_toolchain(root),
+        "packages": image["packages"],
+        "toolchain": image["rust"],
     }
 
 
@@ -495,46 +515,11 @@ def _configure_hostname(guest):
 
 
 def install_tools(guest, *, toolchain=True):
-    """Install the same offline Ubuntu packages; origins do not execute Rust."""
-    guest.execute(
-        [
-            "/bin/sh",
-            "-ec",
-            "apt-get -o Dir::Cache::archives=/run/benchmark/builder-tools "
-            "--no-download --no-install-recommends --yes install "
-            "/run/benchmark/builder-tools/*.deb",
-        ],
-        guest.log_dir / "tools-install.log",
-        timeout=300,
-    )
+    """Verify preinstalled dependencies and the per-guest hostname."""
+    from .prepared_image import verify_prepared_guest
+
+    verify_prepared_guest(guest, guest.log_dir / "prepared-image-check.log")
     _configure_hostname(guest)
-    if toolchain and not all(
-        (guest.root / "rust/bin" / tool).is_file() for tool in ("rustc", "cargo")
-    ):
-        toolchain = json.loads(
-            (guest.root / "rust-toolchain/toolchain.json").read_text()
-        )
-        package_root = toolchain["archive_root"]
-        if toolchain["components"] != list(RUST_COMPONENTS):
-            raise ValueError(
-                "Rust installation must use the verified archive components"
-            )
-        selected = toolchain["installer_files"] + [
-            package_root + "/" + component for component in RUST_COMPONENTS
-        ]
-        unpack = "/run/benchmark/rust-unpack"
-        script = (
-            f"mkdir -p {unpack}; "
-            f"tar -xJf /run/benchmark/rust-toolchain/{RUST_ARCHIVE} -C {unpack} "
-            + " ".join(shlex.quote(member) for member in selected)
-            + f"; cd {unpack}/{shlex.quote(package_root)}; "
-            "./install.sh --components="
-            + ",".join(RUST_COMPONENTS)
-            + " --prefix=/run/benchmark/rust --disable-ldconfig"
-        )
-        guest.execute(
-            ["/bin/sh", "-ec", script], guest.log_dir / "rust-install.log", timeout=600
-        )
     guest.execute(
         [
             "/bin/sh",

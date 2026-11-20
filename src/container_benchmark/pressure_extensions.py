@@ -80,10 +80,20 @@ def configure(profile, root, peer, pin):
             commands[0].update(batch_merge=False, ready_ports=[controller, decoder])
             argv = commands[1]["argv"]
             argv[argv.index("-remotePort") + 1] = str(decoder)
+            final_path = path.with_name("ss-plugin-pressure-final.json")
+            if final_path.exists() or final_path.is_symlink():
+                raise ValueError("private final plugin config path already exists")
+            save(final_path, config)
+            final_path.chmod(0o600)
+            decoder_argv = commands[0]["argv"]
+            decoder_argv[decoder_argv.index("-f") + 1] = "/work/peer/" + final_path.name
+            peer.execute(
+                [decoder_argv[0], "-t", *decoder_argv[1:]],
+                root / "peer/pressure-final-config-check.log",
+                timeout=30,
+            )
         if case["ss_plugin"] == "obfs":
             commands[0].setdefault("udp_ports", []).append(case["port"])
-        save(path, config)
-        path.chmod(0o600)
         return node, commands
     if extension != "quic":
         raise ValueError("unknown pressure extension")

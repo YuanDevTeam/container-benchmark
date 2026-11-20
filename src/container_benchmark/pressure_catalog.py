@@ -274,6 +274,20 @@ def catalogue():
                 "Stable case ID; Mihomo TLS/VLESS server; Xray only generates ECH keys."
             ),
         )
+    name = "hysteria2-native-brutal"
+    result[name] = Profile(
+        name,
+        "mihomo",
+        {
+            "protocol": "hysteria2",
+            "port": 26300,
+            "node_overrides": {"up": 2000, "down": 2000},
+        },
+        note=(
+            "Mihomo Hysteria2 listener; explicit per-direction bandwidth selects "
+            "Brutal, without obfuscation."
+        ),
+    )
     name = "hysteria2-native-brutal-salamander"
     result[name] = Profile(
         name,

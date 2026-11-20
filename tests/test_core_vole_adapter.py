@@ -302,6 +302,12 @@ class VoleAdapterTest(unittest.TestCase):
         source.mkdir()
         native_cache = self.root / "benchmark/.cache/vole-native-linux"
         peer = SimpleNamespace(name="owned-builder", record={}, stop=Mock())
+        image = self.root / "Image"
+        image.write_bytes(b"synthetic shared kernel")
+        binding = {
+            "paths": {"image": image},
+            "frozen": {"expectedRelease": "7.3.1-vole-kata430"},
+        }
         inspection = [
             {
                 "configuration": {
@@ -338,6 +344,12 @@ class VoleAdapterTest(unittest.TestCase):
             patch.object(linux_builder, "BENCHMARK_ROOT", self.root / "benchmark"),
             patch.object(linux_builder, "ContainerPeer", return_value=peer),
             patch.object(linux_builder, "command", side_effect=command) as executed,
+            patch(
+                "container_benchmark.kernel_environment.prepare_guest_kernel",
+                return_value=binding,
+            ),
+            patch("container_benchmark.kernel_environment.verify_guest_kernel"),
+            patch("container_benchmark.prepared_image.verify_prepared_guest"),
         ):
             with linux_builder.LinuxGuest(
                 self.root / "builder",

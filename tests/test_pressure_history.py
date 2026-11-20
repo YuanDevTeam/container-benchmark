@@ -6,12 +6,25 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from container_benchmark.core_comparison import linux_client_execution
+from container_benchmark.memory_policy import assess_memory, execution_scope
 from container_benchmark.pressure_history import PassedWindows
 
 
 def formal_row(*, tls=False):
+    memory = assess_memory(
+        "linux",
+        {
+            "metric": "rss",
+            "unit": "bytes",
+            "available": True,
+            "peakBytes": 30 * 1024**2,
+            "peakKind": "sampled_max",
+        },
+    )
     return {
         "core": "vole",
+        "client_execution": linux_client_execution(),
         "phase": "acceptance",
         "status": "MEASURED",
         "peer_health_valid": True,
@@ -32,6 +45,9 @@ def formal_row(*, tls=False):
                 "goodput_mbps": 999.8,
                 "cpu_percent": 52.1,
                 "peak_bytes": 30 * 1024**2,
+                "memory_policy": memory["policy"],
+                "memory_assessment": memory,
+                "memory_limit_met": None,
                 "udp_loss_rate": None,
             }
         ],
@@ -39,6 +55,98 @@ def formal_row(*, tls=False):
 
 
 class PassedWindowsTests(unittest.TestCase):
+    def test_apple_history_requires_footprint_within_45_mib(self):
+        row = formal_row()
+        row["client_execution"] = execution_scope(
+            client_os="ios",
+            client_arch="arm64",
+            backend="apple-device",
+            tun_kind="apple-ne",
+        )
+        self.assertFalse(self.remember(row))  # Linux policy cannot sign Apple.
+        for metric, peak, accepted in (
+            ("rss", 30, False),
+            ("physical_footprint", 46, False),
+            ("physical_footprint", 45, True),
+        ):
+            assessment = assess_memory(
+                "ios",
+                {
+                    "metric": metric,
+                    "unit": "bytes",
+                    "available": True,
+                    "peakBytes": peak * 1024**2,
+                    "peakKind": "kernel_lifetime",
+                },
+            )
+            row["cases"][0].update(
+                memory_policy=assessment["policy"],
+                memory_assessment=assessment,
+                memory_limit_met=assessment["gateMet"],
+            )
+            with self.subTest(metric=metric, peak=peak):
+                self.assertEqual(self.remember(row), accepted)
+
+        proof = next(iter(PassedWindows(self.path).entries.values()))
+        self.assertEqual(proof["execution_scope"], row["client_execution"])
+        self.assertEqual(proof["metrics"]["memory_metric"], "physical_footprint")
+        self.assertEqual(proof["metrics"]["peak_memory_mib"], 45)
+        self.assertIsNone(proof["metrics"]["peak_rss_mib"])
+
+    def test_linux_proof_requires_policy_but_can_record_unknown_rss(self):
+        row = formal_row()
+        sample = row["cases"][0]
+        sample.pop("memory_policy")
+        self.assertFalse(self.remember(row))
+        memory = assess_memory("linux", {"metric": "rss", "available": False})
+        sample.update(memory_policy=memory["policy"], memory_assessment=memory)
+        self.assertTrue(self.remember(row))
+        proof = next(iter(self.history.entries.values()))
+        self.assertEqual(proof["metrics"]["memory_metric"], "rss")
+        self.assertIsNone(proof["metrics"]["peak_rss_mib"])
+
+    def test_distinct_execution_scopes_never_replace_or_reuse_prior_proof(self):
+        self.assertTrue(self.remember())
+        original = deepcopy(next(iter(self.history.entries.values())))
+        scope = original["execution_scope"]
+        host = "wslc" if scope["backend"] != "wslc" else "apple-container"
+        other = scope | {"backend": host}
+        for mismatch in (other, scope | {"memoryPolicyID": "old-memory-policy"}):
+            self.assertFalse(
+                self.history.contains(
+                    "vless-tcp-plain", "tcp", 1000, execution_scope=mismatch
+                )
+            )
+        row = formal_row()
+        row["client_execution"] = other
+        self.assertTrue(self.remember(row, evidence="other-backend"))
+        entry = next(iter(PassedWindows(self.path).entries.values()))
+        self.assertEqual(entry.pop("scope_passes")[0]["execution_scope"], other)
+        self.assertEqual(entry, original)
+
+    def test_legacy_scope_is_preserved_but_requires_original_linux_identity(self):
+        self.assertTrue(self.remember())
+        saved = json.loads(self.path.read_text())
+        proof = next(iter(saved["entries"].values()))
+        proof.pop("execution_scope")
+        self.path.write_text(json.dumps(saved))
+        before = self.path.read_bytes()
+        scope = linux_client_execution()
+
+        def may_resume():
+            return PassedWindows(self.path).contains(
+                "vless-tcp-plain", "tcp", 1000, execution_scope=scope, legacy_linux=True
+            )
+
+        self.assertFalse(may_resume())
+        self.assertEqual(self.path.read_bytes(), before)
+        proof["identities"]["client_execution"] = {
+            key: value for key, value in scope.items() if key != "memoryPolicyID"
+        }
+        proof["assessment"]["memory_limit_met"] = True
+        self.path.write_text(json.dumps(saved))
+        self.assertTrue(may_resume())
+
     def scoped_row(
         self, *, name="mieru-udp-pattern", seconds=60, family=4, fallback=True
     ):
@@ -176,7 +284,11 @@ class PassedWindowsTests(unittest.TestCase):
         self.assertFalse(self.path.exists())
         self.assertTrue(self.remember())
         restored = PassedWindows(self.path)
-        self.assertTrue(restored.contains("vless-tcp-plain", "tcp", 1000))
+        self.assertTrue(
+            restored.contains(
+                "vless-tcp-plain", "tcp", 1000, execution_scope=linux_client_execution()
+            )
+        )
         for profile, mode, rate, tls in (
             ("vless-tcp-tls", "tcp", 1000, False),
             ("vless-tcp-plain", "udp", 1000, False),
@@ -184,7 +296,15 @@ class PassedWindowsTests(unittest.TestCase):
             ("vless-tcp-plain", "tcp", 1000, True),
         ):
             with self.subTest(profile=profile, mode=mode, rate=rate, tls=tls):
-                self.assertFalse(restored.contains(profile, mode, rate, tls))
+                self.assertFalse(
+                    restored.contains(
+                        profile,
+                        mode,
+                        rate,
+                        tls,
+                        execution_scope=linux_client_execution(),
+                    )
+                )
         self.assertTrue(self.remember(tls=True))
         self.assertEqual(len(PassedWindows(self.path).entries), 2)
         plain = next(iter(restored.entries.values()))
@@ -267,6 +387,7 @@ class PassedWindowsTests(unittest.TestCase):
                 selected_server="different-peer",
                 workload=row["workload"],
                 queue_length=4096,
+                execution_scope=linux_client_execution(),
             )
         )
 
@@ -473,7 +594,9 @@ class PassedWindowsTests(unittest.TestCase):
         self.assertFalse(self.remember(evidence="later-report#window"))
         self.assertEqual(self.path.read_bytes(), initial)
         self.assertTrue(
-            PassedWindows(self.path).contains("vless-tcp-plain", "tcp", 1000)
+            PassedWindows(self.path).contains(
+                "vless-tcp-plain", "tcp", 1000, execution_scope=linux_client_execution()
+            )
         )
 
     def test_new_server_appends_proof_without_reusing_or_erasing_the_old_pass(self):
@@ -484,7 +607,15 @@ class PassedWindowsTests(unittest.TestCase):
             )
         )
         original = deepcopy(next(iter(self.history.entries.values())))
-        self.assertFalse(self.history.contains("tuic", "tcp", 1000, server="tuic"))
+        self.assertFalse(
+            self.history.contains(
+                "tuic",
+                "tcp",
+                1000,
+                server="tuic",
+                execution_scope=linux_client_execution(),
+            )
+        )
         row["profile"] = {"peer_selection": {"server": "tuic"}}
         self.assertTrue(
             self.history.remember(
@@ -498,7 +629,15 @@ class PassedWindowsTests(unittest.TestCase):
             )
         )
         restored = PassedWindows(self.path)
-        self.assertTrue(restored.contains("tuic", "tcp", 1000, server="tuic"))
+        self.assertTrue(
+            restored.contains(
+                "tuic",
+                "tcp",
+                1000,
+                server="tuic",
+                execution_scope=linux_client_execution(),
+            )
+        )
         entry = next(iter(restored.entries.values()))
         self.assertEqual(
             {k: v for k, v in entry.items() if k != "peer_passes"}, original

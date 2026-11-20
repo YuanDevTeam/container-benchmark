@@ -2,8 +2,7 @@
 
 当前正式执行默认1Gbps、每窗60秒，使用真实raw-IP TUN、Controller、完整官方CN GeoData及共享队列配置。
 环境、指标和独立门禁见[README](../README.md#固定环境与输入)与[验收策略](../README.md#优化与验收策略)。
-已完成范围见[最终结论](../conclusions/full-pressure-final.md)，逐窗口结果见[协议结果](protocol-results.md)；
-这些结果不表示整个历史库存由同一最终二进制重测。
+[历史逐窗结果](protocol-results.md)保留各次测量的实际版本。
 
 ## 分组与检查点
 
@@ -79,4 +78,4 @@ Mihomo H3/IP参考只在有效测量、明确SIGINT、exit0且无自行退出／
 
 结论和剩余选择先持久化，再删除所属容器与scratch；保留正式运行账本和已验证共享依赖。
 设置／业务异常保留首因，清理失败保留未回收记录供原owner恢复。
-仅限自有Ubuntu26 NAT合成客户端、对端与原站，无宿主端口；宿主VPN、路由、DNS、防火墙及无关资源保持。
+仅限自有Ubuntu26 NAT合成客户端、对端与原站；容器服务可按测试需要发布宿主端口，宿主VPN、路由、DNS、防火墙及无关资源保持。

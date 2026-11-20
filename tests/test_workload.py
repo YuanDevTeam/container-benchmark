@@ -64,6 +64,50 @@ class WorkloadTest(unittest.TestCase):
         self.assertEqual(direction["loss_packets"], 1)
         self.assertFalse(report["payload_valid"])
 
+    def test_raw_udp_counts_keep_actual_io_separate_from_plan_and_validity(self):
+        rows = traffic()
+        flow = rows[0]["flows"][0]
+        flow["expected_udp_packets"] = 1000
+        flow["source_verified"] = False
+        flow["sent"]["packets"] = 3
+        flow["received"].update(packets=4, unique_packets=-1, payload_errors=2)
+        down = dict(
+            flow,
+            direction="down",
+            expected_udp_packets=20,
+            sent={"packets": 0},
+            received={"packets": 0},
+        )
+        rows[0]["flows"].append(down)
+
+        counts = workload.raw_directional_packets(rows)
+        self.assertEqual(
+            counts,
+            {
+                "up": {
+                    "sent_packets": 3,
+                    "received_packets": 4,
+                    "planned_packets": 1000,
+                    "unsent_packets": 997,
+                },
+                "down": {
+                    "sent_packets": 0,
+                    "received_packets": 0,
+                    "planned_packets": 20,
+                    "unsent_packets": 20,
+                },
+            },
+        )
+        del flow["expected_udp_packets"]
+        counts = workload.raw_directional_packets(rows)["up"]
+        self.assertEqual(counts["sent_packets"], 3)
+        self.assertIsNone(counts["planned_packets"])
+        self.assertIsNone(counts["unsent_packets"])
+        del flow["received"]["packets"]
+        self.assertIsNone(
+            workload.raw_directional_packets(rows)["up"]["received_packets"]
+        )
+
     def test_corrupt_records_still_count_after_a_later_io_error(self):
         for kind in ("tcp", "udp"):
             with self.subTest(kind=kind):

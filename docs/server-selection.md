@@ -19,7 +19,7 @@ TUIC `native`、`quic` 的服务端为 Itsusinn，后端标识为 `tuic`，运�
 
 用户明确允许已确认 Mihomo listener 错误的 Mieru 场景使用官方服务器。五个既有压力组合显式选择官方 mita：TCP载体standard／no-wait／pattern，以及UDP载体standard／pattern；主互通九项仍使用Mihomo，不因一次失败自动扩大例外。
 
-TCP载体的[跨逻辑UDP会话NAT错回](../conclusions/mieru-tcp-nat-alias.md)已有32条直接事件。UDP载体的[正常Close／在途DATA边界](../conclusions/mieru-sdk-close-current.md)已有双端证据；其中另8个约63秒timeout的先前停滞仍未知。先前稳定版官方mita也使用同源SDK和类似BidiCopy关闭；新会话解析最新稳定版，选官方端用于排除listener层差异，不预先宣称尾缺已修复。
+TCP 载体已观察到 32 次跨逻辑 UDP 会话 NAT 错回。UDP 载体的正常 Close 和在途 DATA 缺口有双端证据，8 个约 63 秒的停滞仍未归因。选择官方 Mieru 服务端用于排查 listener 差异，每次会话冻结稳定版的实际身份。
 
 例外作为内部 `peer_exception` 和结果 `peer_selection.exceptions` 记录，明确缺陷、来源、证据与授权；不把已支持字段伪报缺失，不加入Core YAML。未知例外、其他协议和未审查fixture不能绕过顺位。mita仍按每日最新稳定版从共享缓存复制，冻结本次实际ELF和配置身份；失败时所选参考客户端仍使用同一mita服务器。
 
@@ -45,6 +45,9 @@ TCP载体的[跨逻辑UDP会话NAT错回](../conclusions/mieru-tcp-nat-alias.md)
 
 HY2 的官方补充目录仅保留两个跳跃组合和一个 `disableUDP` 组合。HY2 的 mTLS、Salamander 本身不是切到官方端的理由。TUIC 只有上表 UoT v2、客户端证书认证字段专项可用 Mihomo，普通握手、互通、准备、压力或启动失败均不切换。
 
+Mac 全负载的原生 HY2 跳跃组合使用官方 Hysteria2。保留 nft 的候选端口包计数；
+应用交付证明须独立取得。
+
 ## 协议服务端与辅助层
 
 - `custom` 是配置 factory，实际协议服务端为 Mihomo。
@@ -54,6 +57,8 @@ HY2 的官方补充目录仅保留两个跳跃组合和一个 `disableUDP` 组�
 - TLS／HTTP 观察前端、STUN 和 Realm 注册设施分别见证握手或控制面，不作为更换代理协议服务端的理由。
 - TCP ECH 的 Xray 命令仅生成合成密钥；公开 TLS／VLESS listener 仍为 Mihomo。DoH/H3 的独立 DNS 原站使用官方 dnsproxy：Mihomo `dns/server.go` 只启动 UDP／TCP DNS 服务，没有对应 H3 DNS listener。
 
+MASQUE/H2 IP 的受控 Linux 夹具在原单个 TUN 输出 worker 内合批已经就绪的返回包：每批最多16包、16KiB完整 capsule，首包仍正常等待，追加读取不等待、不使用计时器。固定编码工作区为16KiB，原64KiB读缓冲最多暂持一个完整后继包；较大合法包沿单包路径，不能缩短读取缓冲来凑批。PMTU回包沿同一写锁，只有成功Flush的批次计为已发送，失败不重放。H3路径保持逐数据报处理。此为夹具侧优化，比较结果必须保留实际服务端源码与二进制身份，不能把其收益单独归给客户端Core。
+
 ## 当前目录与验证范围
 
 目录为 **178 个压力组合、89 个主互通用例**：Mihomo 42、Itsusinn TUIC 2、Xray-core 17、V2Ray-core 9、shadowsocks-rust 4、官方 Hysteria2 3、Caddy 前端 3、MASQUE 9。这是静态选端数量，Caddy 为 factory 分类，其实际协议处理层按上节记录，不是网络通过数量。
@@ -62,4 +67,4 @@ HY2 的官方补充目录仅保留两个跳跃组合和一个 `disableUDP` 组�
 
 公共压力生成器发送 IP 目标，不以 Trojan domain-UDP 名称宣称验证域名编码；TCP／WS／gRPC 基础压力路径使用 Mihomo。真实域名编码由主互通用例对 Xray-core 验证。静态选端、配置生成、离线检查或短前检均不能代签正式压力。
 
-历史结果保留原服务端、版本、源码与负载身份，不自动代签新的路由或后续版本；客户端始终为 Vole、Mihomo。已接受的整体覆盖见[最终覆盖结论](../conclusions/full-pressure-final.md)，协议事实和未知边界分别见[协议结果](protocol-results.md)与[已知问题](known-issues.md)。平台和真机另行验收。
+历史结果保留原服务端、版本、源码与负载身份，不自动代签新的路由或后续版本；客户端始终为 Vole、Mihomo。历史覆盖和验证边界见 [协议结果](protocol-results.md) 与 [已知问题](known-issues.md)。平台和真机另行验收。

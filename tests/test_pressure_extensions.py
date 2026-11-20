@@ -33,6 +33,230 @@ class OfflineGuest:
 
 
 class PressureExtensionTests(unittest.TestCase):
+    def _assert_obfs_publication(self, name):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "peer").mkdir()
+            profile = next(
+                p for p in pressure_extensions.profiles(Profile) if p.name == name
+            )
+            publications, checked = [], []
+
+            class ConsumingGuest(OfflineGuest):
+                def execute(self, argv, log, *, timeout=60):
+                    if "-t" in argv and "-f" in argv:
+                        path = root / Path(argv[argv.index("-f") + 1]).relative_to(
+                            "/work"
+                        )
+                        data = path.read_bytes()
+                        checked.append(
+                            (
+                                path.stat().st_ino,
+                                data,
+                                json.loads(data),
+                                path.stat().st_mode & 0o777,
+                            )
+                        )
+                    super().execute(argv, log, timeout=timeout)
+
+            guest = ConsumingGuest()
+            plugin_save = pressure_extensions.ss_plugins.save
+            extension_save = pressure_extensions.save
+
+            def initial_save(path, value):
+                # Preserve configure_peer's real write_text publication.
+                plugin_save(path, value)
+                publications.append((Path(path).stat().st_ino, Path(path).read_bytes()))
+
+            def later_save(path, value):
+                # Preserve extension's real atomic replace, if called.
+                extension_save(path, value)
+                publications.append((Path(path).stat().st_ino, Path(path).read_bytes()))
+
+            with (
+                patch.object(
+                    pressure_extensions.ss_plugins, "save", side_effect=initial_save
+                ),
+                patch.object(pressure_extensions, "save", side_effect=later_save),
+            ):
+                node, commands = pressure_extensions.configure(
+                    profile, root, guest, "00" * 32
+                )
+
+            # Actual configure_peer ran: it saved, chmodded and asked the
+            # guest to parse the config before returning to the extension.
+            self.assertEqual(len(checked), 1)
+            self.assertEqual(checked[0][:2], publications[0])
+            self.assertEqual(checked[0][3], 0o600)
+            self.assertEqual(
+                checked[0][2]["listeners"][0]["simple-obfs"],
+                {"enable": True, "mode": profile.case["mode"]},
+            )
+            self.assertEqual(
+                commands,
+                [
+                    {
+                        "argv": [
+                            "/work/artifacts/mihomo",
+                            "-d",
+                            "/work/peer",
+                            "-f",
+                            "/work/peer/ss-plugins.json",
+                        ],
+                        "ready_ports": [9091, profile.case["port"]],
+                        "ready_host": "127.0.0.1",
+                        "udp_ports": [profile.case["port"]],
+                    }
+                ],
+            )
+            self.assertEqual(
+                node,
+                pressure_extensions.ss_plugins.node(
+                    profile.case, guest.ipv4, "00" * 32
+                ),
+            )
+            path = root / "peer/ss-plugins.json"
+            # No copied JSON stub: this is the real file/inode consumed by
+            # guest config-check before extension.configure returned.
+            self.assertEqual(
+                path.stat().st_ino, checked[0][0], "guest-consumed inode was replaced"
+            )
+            self.assertEqual(path.read_bytes(), checked[0][1])
+            self.assertEqual(len(publications), 1)
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+
+    def test_v2ray_final_launch_config_is_fresh_checked_and_immutable(self):
+        for auxiliary in (None, 36400):
+            with self.subTest(auxiliary=auxiliary):
+                self._assert_v2ray_final_publication(auxiliary)
+
+    def _assert_v2ray_final_publication(self, auxiliary):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "peer").mkdir()
+            profile = next(
+                p
+                for p in pressure_extensions.profiles(Profile)
+                if p.name == "ss2022-v2ray-plugin-mux"
+            )
+            if auxiliary is not None:
+                profile = SimpleNamespace(
+                    backend=profile.backend,
+                    case=dict(profile.case, pressure_aux_base=auxiliary),
+                )
+            decoder = 36000 if auxiliary is None else auxiliary
+            checked, publications = [], []
+
+            class CheckingGuest(OfflineGuest):
+                def execute(self, argv, log, *, timeout=60):
+                    if "-t" in argv and "-f" in argv:
+                        path = root / Path(argv[argv.index("-f") + 1]).relative_to(
+                            "/work"
+                        )
+                        checked.append(
+                            {
+                                "path": path,
+                                "inode": path.stat().st_ino,
+                                "bytes": path.read_bytes(),
+                                "mode": path.stat().st_mode & 0o777,
+                                "argv": list(argv),
+                            }
+                        )
+                    super().execute(argv, log, timeout=timeout)
+
+            guest = CheckingGuest()
+            actual_save = pressure_extensions.save
+
+            def publish(path, value):
+                actual_save(path, value)
+                publications.append(Path(path))
+
+            with patch.object(pressure_extensions, "save", side_effect=publish):
+                node, commands = pressure_extensions.configure(
+                    profile, root, guest, "00" * 32
+                )
+
+            self.assertTrue(checked, "the real factory must check its first file")
+            original = checked[0]
+            self.assertEqual(original["path"], root / "peer/ss-plugins.json")
+            self.assertEqual(original["mode"], 0o600)
+            self.assertEqual(
+                original["path"].stat().st_ino,
+                original["inode"],
+                "the guest-consumed factory file must remain unchanged",
+            )
+            self.assertEqual(original["path"].read_bytes(), original["bytes"])
+            final = root / "peer/ss-plugin-pressure-final.json"
+            self.assertEqual(publications, [final])
+            self.assertEqual(len(checked), 2)
+            self.assertEqual(checked[1]["path"], final)
+            self.assertNotEqual(checked[1]["path"], original["path"])
+            self.assertEqual(checked[1]["mode"], 0o600)
+            self.assertEqual(final.stat().st_ino, checked[1]["inode"])
+            self.assertEqual(final.read_bytes(), checked[1]["bytes"])
+            self.assertEqual(final.stat().st_mode & 0o777, 0o600)
+            config = json.loads(checked[1]["bytes"])
+            expected = json.loads(original["bytes"])
+            expected["external-controller"] = f"10.255.253.1:{decoder + 1}"
+            expected["listeners"][0]["port"] = decoder
+            self.assertEqual(config, expected)
+            self.assertEqual(len(commands), 2)
+            self.assertEqual(
+                commands[0],
+                {
+                    "argv": [
+                        "/work/artifacts/mihomo",
+                        "-d",
+                        "/work/peer",
+                        "-f",
+                        "/work/peer/ss-plugin-pressure-final.json",
+                    ],
+                    "ready_ports": [decoder + 1, decoder],
+                    "ready_host": "10.255.253.1",
+                    "batch_merge": False,
+                },
+            )
+            self.assertEqual(
+                checked[1]["argv"],
+                [commands[0]["argv"][0], "-t", *commands[0]["argv"][1:]],
+                "launch must use the exact final configuration validated by -t",
+            )
+            self.assertEqual(
+                commands[1],
+                {
+                    "argv": [
+                        "/work/artifacts/v2ray-plugin",
+                        "-server",
+                        "-localAddr",
+                        "0.0.0.0",
+                        "-localPort",
+                        str(profile.case["port"]),
+                        "-remoteAddr",
+                        "10.255.253.1",
+                        "-remotePort",
+                        str(decoder),
+                        "-path",
+                        "/interop-ss-plugin/",
+                        "-mode",
+                        "websocket",
+                        "-mux",
+                        "1",
+                        "-loglevel",
+                        "none",
+                    ],
+                    "ready_ports": [profile.case["port"]],
+                    "ready_host": "10.255.253.2",
+                    "ss_plugin_namespace": True,
+                    "ss_plugin_frontend_ip": guest.ipv4,
+                },
+            )
+            self.assertEqual(
+                node,
+                pressure_extensions.ss_plugins.node(
+                    profile.case, guest.ipv4, "00" * 32
+                ),
+            )
+
     def test_private_decoder_launch_opens_a_fresh_guest_config_after_host_relocation(
         self,
     ):

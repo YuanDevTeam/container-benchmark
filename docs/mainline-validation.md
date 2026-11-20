@@ -1,9 +1,7 @@
 # 主线验证的最终范围
 
 本页汇总已完成的编译、有限Linux功能与原生ABI结论，按实际源码和产物分别签收。
-当前压力接受源码为clean `6c3e3c2`，主465项与队列外5项的[最终结果](../conclusions/full-pressure-final.md)
-采用未受影响来源继承及受影响回归，不表示下列旧源码平台／ABI检查已在该提交重跑。
-逐窗口压力指标见[协议结果](protocol-results.md)，未关闭问题见[已知问题](known-issues.md)。
+Linux 1 Gbps 历史压力结果包含 465 个主窗口和 5 个额外窗口，采用未受影响证明继承及受影响窗口复验。逐窗指标及边界见 [协议结果](protocol-results.md) 和 [已知问题](known-issues.md)。
 
 ## 已验证的Linux FFI产物
 

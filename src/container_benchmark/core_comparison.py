@@ -17,7 +17,9 @@ from types import SimpleNamespace
 
 from .container_backend import ensure_runtime
 from .container_resources import MEMORY_BYTES
+from .memory_policy import execution_scope
 from .pressure_acceptance import (
+    RAW_MIHOMO_METRIC_POLICY,
     annotate_pressure_case,
     annotate_reference_acceptance,
     performance_reference,
@@ -29,6 +31,19 @@ from .pressure_optimization import load_optimization_rounds
 CORES = ("vole", "mihomo")
 QUEUE_LENGTH = 4096
 CONTROLLER_ADDRESS = "127.0.0.1:9090"
+
+
+def linux_client_execution():
+    """Identity of this explicitly Linux-only container client path."""
+    from .container_backend import is_windows
+    from .guest_architecture import architecture
+
+    return execution_scope(
+        client_os="linux",
+        client_arch=architecture(),
+        backend="wslc" if is_windows() else "apple-container",
+        tun_kind="linux-real-tun",
+    )
 
 
 def _read_window_selection(path, profiles, transports, *, tls13=False):
@@ -349,6 +364,7 @@ def _summary(root, report, *, latest=None):
     metadata["runs"] = {
         name: {
             "status": row.get("status"),
+            "client_execution": row.get("client_execution"),
             "validation_layer": row.get("validation_layer", "unknown"),
             "assessments": [
                 {
@@ -371,6 +387,8 @@ def _summary(root, report, *, latest=None):
                         "strict_status", "NOT_RUN"
                     ),
                     "memory_limit_met": case.get("memory_limit_met"),
+                    "memory_policy": case.get("memory_policy"),
+                    "memory_assessment": case.get("memory_assessment"),
                 }
                 for case in row.get("cases", [])
             ],
@@ -668,6 +686,7 @@ def _phase_memory(path, barrier_ns, seconds):
     phases = {
         name: [] for name in ("preparation", "baseline", "slow", "recovery", "drain")
     }
+    unavailable = 0
     for line in path.read_text().splitlines():
         row = json.loads(line)
         elapsed = (row["monotonic_ns"] - barrier_ns) / 1_000_000_000
@@ -682,11 +701,16 @@ def _phase_memory(path, barrier_ns, seconds):
             if elapsed < seconds
             else "drain"
         )
-        phases[phase].append(row["rss"])
+        rss = row.get("rss")
+        if type(rss) is int and rss > 0:
+            phases[phase].append(rss)
+        else:
+            unavailable += 1
     return {
-        "available": True,
+        "available": any(phases.values()),
         "metric": "sampled_current_rss",
         "scope": "guest start barrier; 20ms observations, not instantaneous maxima",
+        "unavailable_samples": unavailable,
         "peak_bytes": {
             name: max(values) if values else None for name, values in phases.items()
         },
@@ -891,6 +915,12 @@ def _guest_run(root, core):
                         case["direction_packets"] = workload.directional_packets(
                             traffic
                         )
+                    if core == "mihomo" and not scenario:
+                        case["reference_metric_policy"] = RAW_MIHOMO_METRIC_POLICY
+                        if scene in ("udp", "mixed"):
+                            case["raw_direction_packets"] = (
+                                workload.raw_directional_packets(traffic)
+                            )
                     report["cases"].append(case)
                     save(root / "report.json", report)
                     time.sleep(1)
@@ -960,6 +990,7 @@ def _comparison_context(root: Path, assets, image: str) -> dict:
         },
         "traffic_sha256": sha256(root / "artifacts/traffic-linux"),
         "queue_length": QUEUE_LENGTH,
+        "client_execution": linux_client_execution(),
     }
 
 
@@ -1073,6 +1104,7 @@ def _run_window(
         workload=dict(vars(args)),
         environment=guest.record,
         profile=profile.record(),
+        client_execution=linux_client_execution(),
     )
     if scenario:
         result["scenario"] = scenario

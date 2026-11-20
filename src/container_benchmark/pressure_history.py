@@ -8,6 +8,8 @@ import os
 import tempfile
 from pathlib import Path
 
+from .memory_policy import assess_memory, memory_gate_allows, policy_for
+from .memory_policy import execution_scope as make_execution_scope
 from .paths import BENCHMARK_ROOT
 from .pressure_acceptance import performance_reference, pressure_integrity
 
@@ -29,6 +31,46 @@ def _key(profile: str, mode: str, rate: int, tls: bool) -> str:
 
 def _number(value):
     return value if type(value) in (int, float) and math.isfinite(value) else None
+
+
+def _execution_scope(value):
+    """Validate a complete client scope without using the orchestrator OS."""
+    fields = ("clientOS", "clientArch", "backend", "tunKind", "memoryPolicyID")
+    if not isinstance(value, dict) or set(value) != set(fields):
+        return None
+    try:
+        expected = make_execution_scope(
+            client_os=value["clientOS"],
+            client_arch=value["clientArch"],
+            backend=value["backend"],
+            tun_kind=value["tunKind"],
+        )
+    except (ValueError, TypeError):
+        return None
+    return dict(value) if value == expected else None
+
+
+def _scope_matches(proof, requested, *, legacy_linux):
+    if requested is None:
+        return False
+    actual = proof.get("execution_scope")
+    if actual is not None:
+        return _execution_scope(actual) == requested
+    # Legacy records remain intact but are never inferred to describe a new
+    # platform. Opt-in compatibility still needs independent Linux/arch/backend
+    # provenance; the old coordinate key alone does not establish these facts.
+    provenance = proof.get("identities", {}).get("client_execution")
+    assessment = proof.get("assessment")
+    fields = ("clientOS", "clientArch", "backend", "tunKind")
+    return (
+        legacy_linux is True
+        and requested["clientOS"] == "linux"
+        and requested["tunKind"] == "linux-real-tun"
+        and isinstance(provenance, dict)
+        and all(provenance.get(key) == requested[key] for key in fields)
+        and isinstance(assessment, dict)
+        and assessment.get("memory_limit_met") is True
+    )
 
 
 def _identities(report: dict) -> dict:
@@ -203,7 +245,12 @@ class PassedWindows:
         selected_server=None,
         workload=None,
         queue_length=None,
+        execution_scope=None,
+        legacy_linux=False,
     ) -> bool:
+        requested = _execution_scope(execution_scope)
+        if requested is None:
+            return False
         entry = self.entries.get(_key(profile_name, mode, rate, tls))
         if entry is None:
             return False
@@ -220,7 +267,8 @@ class PassedWindows:
             if server is None or proof.get("server") == server
         )
         return any(
-            _reusable_proof(
+            _scope_matches(proof, requested, legacy_linux=legacy_linux)
+            and _reusable_proof(
                 proof,
                 profile_name,
                 mode,
@@ -243,6 +291,20 @@ class PassedWindows:
             raise ValueError("passed-window server must be a nonempty name")
         load = row.get("workload") if isinstance(row, dict) else None
         context = row.get("comparison_context") if isinstance(row, dict) else None
+        scope = _execution_scope(
+            row.get(
+                "client_execution",
+                context.get("client_execution") if isinstance(context, dict) else None,
+            )
+            if isinstance(row, dict)
+            else None
+        )
+        if (
+            isinstance(context, dict)
+            and "client_execution" in context
+            and _execution_scope(context["client_execution"]) != scope
+        ):
+            return False
         queue_length = (
             context.get("queue_length") if isinstance(context, dict) else None
         )
@@ -254,11 +316,14 @@ class PassedWindows:
             server=server,
             workload=load,
             queue_length=queue_length,
+            execution_scope=scope,
         ):
             return False
         if not isinstance(evidence, str) or not evidence.strip():
             raise ValueError("a passed window requires its report/window evidence")
         if not isinstance(row, dict):
+            return False
+        if scope is None:
             return False
         cases, load = row.get("cases"), row.get("workload")
         if (
@@ -283,19 +348,42 @@ class PassedWindows:
         case = cases[0]
         if case.get("offered_mbps") != rate or case.get("transport") != mode:
             return False
+        memory = case.get("memory_assessment")
+        policy = policy_for(scope["clientOS"])
+        if (
+            case.get("memory_policy") != policy
+            or not isinstance(memory, dict)
+            or memory.get("policy") != policy
+            or scope["memoryPolicyID"] != policy["policyID"]
+            or memory.get("applicable") is not True
+        ):
+            return False
+        # New proofs require the actual observation to support the declared
+        # assessment. PASS flags alone cannot turn RSS into an Apple footprint.
+        expected_memory = assess_memory(
+            scope["clientOS"],
+            memory.get("observation"),
+            qualified=memory.get("qualified") is True
+            if policy["requiredForAcceptance"]
+            else True,
+        )
+        if memory != expected_memory or not memory_gate_allows(memory):
+            return False
         if case.get("pressure_met") is True:
             basis = "BASE_PASS"
         elif row.get("reference_acceptance", {}).get("status") == "PASS":
             basis = "REFERENCE_PASS"
         else:
             return False
-        peak = _number(case.get("peak_bytes"))
+        metric = memory.get("metric")
+        peak = _number(memory.get("peakBytes"))
         entry = {
             "profile": profile_name,
             "transport": mode,
             "rate_mbps": rate,
             "application_tls13": tls,
             "basis": basis,
+            "execution_scope": scope,
             "assessment": {
                 "integrity": pressure_integrity(case),
                 "performance_reference": performance_reference(
@@ -311,11 +399,17 @@ class PassedWindows:
                     "optimization_policy", {}
                 ),
                 "memory_limit_met": case.get("memory_limit_met"),
+                "memory_policy": case.get("memory_policy"),
+                "memory_assessment": case.get("memory_assessment"),
             },
             "metrics": {
                 "goodput_mbps": _number(case.get("goodput_mbps")),
                 "cpu_percent": _number(case.get("cpu_percent")),
-                "peak_rss_mib": peak / 1024**2 if peak is not None else None,
+                "memory_metric": metric,
+                "peak_memory_mib": peak / 1024**2 if peak is not None else None,
+                "peak_rss_mib": peak / 1024**2
+                if peak is not None and metric == "rss"
+                else None,
                 "udp_loss_rate": _number(case.get("udp_loss_rate")),
             },
             "evidence": evidence,

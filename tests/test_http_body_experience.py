@@ -165,6 +165,110 @@ class HttpBodyExperienceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "duplicate"):
             counters.finish(body.SCENES[0], 0, 0, "modified", 12, 13)
 
+    def test_acceptance_records_optional_rss_without_a_budget(self):
+        for scenario in ("daily", "mixed-slow"):
+            for peak, passed in (
+                (43 * 1024**2 + 1, True),
+                (45 * 1024**2, True),
+                (45 * 1024**2 + 1, True),
+                (512 * 1024**2, True),
+                (None, True),
+                (0, True),
+            ):
+                with self.subTest(scenario=scenario, peak=peak):
+                    case = body.summarize(traffic(scenario), scenario, dns())
+                    case["peak_bytes"] = 30 * 1024**2
+                    report = {
+                        "measurement": {
+                            "status": "PASS",
+                            "cleanup": True,
+                            "samples": 5,
+                            "peak_bytes": peak,
+                            "metric": "rss",
+                            "sigint_requested": True,
+                            "exit_code": 0,
+                            "forced_signals": [],
+                        },
+                        "host_tun_preserved": True,
+                        "cases": [case],
+                    }
+                    body.annotate(report)
+                    self.assertEqual(case["peak_bytes"], peak)
+                    self.assertIsNone(case["memory_limit_bytes"])
+                    self.assertIsNone(case["memory_limit_met"])
+                    self.assertEqual(
+                        case["memory_assessment"]["status"], "NOT_APPLICABLE"
+                    )
+                    self.assertEqual(case["experience_met"], passed)
+                    self.assertTrue(case["memory_screening_only"])
+                    self.assertIsNone(case["device_acceptance_met"])
+
+    def test_memory_allowance_preserves_lifecycle_and_business_gates(self):
+        for scope, key, value in (
+            ("measurement", "status", "ERROR"),
+            ("measurement", "cleanup", False),
+            ("measurement", "samples", 0),
+            ("measurement", "sigint_requested", False),
+            ("measurement", "exit_code", 1),
+            ("measurement", "forced_signals", ["SIGKILL"]),
+            ("measurement", "sampling_errors", ["process-identity-changed"]),
+            ("report", "host_tun_preserved", False),
+            ("case", "complete", False),
+            ("case", "udp_loss_target_met", False),
+            ("case", "dns_completion_met", False),
+            ("socket_witness", "count_matches", False),
+        ):
+            with self.subTest(scope=scope, key=key, value=value):
+                case = body.summarize(traffic(), "daily", dns())
+                report = {
+                    "measurement": {
+                        "status": "PASS",
+                        "cleanup": True,
+                        "samples": 5,
+                        "peak_bytes": 45 * 1024**2,
+                        "sigint_requested": True,
+                        "exit_code": 0,
+                        "forced_signals": [],
+                    },
+                    "host_tun_preserved": True,
+                    "cases": [case],
+                }
+                target = (
+                    report["measurement"]
+                    if scope == "measurement"
+                    else report
+                    if scope == "report"
+                    else case
+                    if scope == "case"
+                    else case["socket_witness"]
+                )
+                target[key] = value
+                body.annotate(report)
+                self.assertFalse(case["experience_met"])
+
+    def test_memory_read_failure_is_reference_only_without_masking_real_exit(self):
+        case = body.summarize(traffic(), "daily", dns())
+        report = {
+            "measurement": {
+                "status": "PASS",
+                "cleanup": True,
+                "samples": 5,
+                "peak_bytes": None,
+                "memory_available": False,
+                "memory_sampling_errors": ["memory-only"],
+                "sigint_requested": True,
+                "exit_code": 0,
+                "forced_signals": [],
+            },
+            "host_tun_preserved": True,
+            "cases": [case],
+        }
+        body.annotate(report)
+        self.assertTrue(case["experience_met"])
+        report["measurement"]["exit_code"] = -9
+        body.annotate(report)
+        self.assertFalse(case["experience_met"])
+
     def test_shared_host_driver_uses_an_importable_module_under_python_m(self):
         with patch.object(body.host, "run", return_value={"status": "MEASURED"}) as run:
             self.assertEqual(

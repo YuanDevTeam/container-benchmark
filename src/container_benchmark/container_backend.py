@@ -234,6 +234,9 @@ def _image_ref(ref):
         return ref
     if "/" not in ref:
         return "docker.io/library/" + ref
+    host = ref.split("/", 1)[0]
+    if host == "localhost" or "." in host or ":" in host:
+        return ref
     return "docker.io/" + ref
 
 
@@ -245,6 +248,22 @@ def _image(row, ref):
             "wslc image does not match the native Linux guest architecture"
         )
     requested, _, pinned = _image_ref(ref).partition("@")
+    from .ownership import PREPARED_IMAGE
+
+    if PREPARED_IMAGE.fullmatch(requested):
+        # Locally loaded OCI images have no registry RepoDigest in WSLC.
+        # Preserve the actual config ID separately from the OCI manifest ID.
+        digest = row.get("Id", "")
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+            raise ContainerError("prepared WSLC image has no valid local config ID")
+        return {
+            "id": digest,
+            "configuration": {
+                "name": requested,
+                "descriptor": {"digest": digest},
+                "identityKind": "local-config",
+            },
+        }
     if requested.rfind(":") > requested.rfind("/"):
         requested = requested.rsplit(":", 1)[0]
     digests = row.get("RepoDigests", []) or []

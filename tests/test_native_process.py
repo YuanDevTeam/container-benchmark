@@ -108,11 +108,24 @@ class NativeProcessTests(unittest.TestCase):
             self.assertEqual(report["statvfs_error"]["errno"], errno.ENOENT)
 
     @contextlib.contextmanager
-    def observed_process(self, *, hwm_kib, rss_kib, wait4_kib, diagnostics=False):
+    def observed_process(
+        self,
+        *,
+        hwm_kib,
+        rss_kib,
+        wait4_kib,
+        diagnostics=False,
+        status_text=None,
+        status_error=None,
+    ):
         """Exercise the public process lifecycle with deterministic OS counters."""
         pid = 43210
         image = Path(sys.executable).stat()
         counters = {"hwm": hwm_kib, "rss": rss_kib}
+        if status_text is not None:
+            counters["status_text"] = status_text
+        if status_error is not None:
+            counters["status_error"] = status_error
         original_read, original_stat = Path.read_text, Path.stat
         thread_type = threading.Thread
 
@@ -121,11 +134,15 @@ class NativeProcessTests(unittest.TestCase):
                 fields = ["0"] * 22
                 fields[0] = counters.get("state", "S")
                 fields[6] = str(counters.get("flags", 0))
-                fields[11], fields[12] = "5", "3"
+                fields[11], fields[12] = str(counters.get("user", 5)), "3"
                 fields[17] = str(counters.get("threads", 3))
                 fields[19] = str(counters.get("start", 10))
                 return f"{pid} (selected core) " + " ".join(fields)
             if path.as_posix() == f"/proc/{pid}/status":
+                if "status_error" in counters:
+                    raise counters["status_error"]
+                if "status_text" in counters:
+                    return counters["status_text"]
                 return f"VmRSS:\t{counters['rss']} kB\nVmHWM:\t{counters['hwm']} kB\n"
             return original_read(path, *args, **kwargs)
 
@@ -181,6 +198,114 @@ class NativeProcessTests(unittest.TestCase):
                 yield process, counters
             finally:
                 process.close()
+
+    def test_missing_or_invalid_memory_does_not_block_identity_cpu_or_cleanup(self):
+        for status_text, status_error in (
+            ("Name:\tselected core\n", None),
+            ("VmRSS:\t12 MB\nVmHWM:\t14 kB\n", None),
+            ("VmRSS:\t-1 kB\nVmHWM:\t14 kB\n", None),
+            ("VmRSS:\tbroken kB\nVmHWM:\t14 kB\n", None),
+            ("VmRSS:\t18446744073709551615 kB\nVmHWM:\t14 kB\n", None),
+            (None, PermissionError(errno.EACCES, "memory counter denied")),
+            (None, FileNotFoundError(errno.ENOENT, "status missing")),
+        ):
+            with (
+                self.subTest(status=status_text, error=status_error),
+                self.observed_process(
+                    hwm_kib=32768,
+                    rss_kib=16384,
+                    wait4_kib=262144,
+                    status_text=status_text,
+                    status_error=status_error,
+                ) as (process, _),
+            ):
+                row = process.sample()
+                self.assertEqual(row["pid"], process.child.pid)
+                self.assertGreater(row["user_ns"], 0)
+                self.assertGreater(row["system_ns"], 0)
+                self.assertIsNone(row["rss"])
+                self.assertIsNone(row["peak"])
+                result = process.close()
+                self.assertEqual(result["status"], "PASS")
+                self.assertTrue(result["cleanup"])
+                self.assertGreaterEqual(result["samples"], 2)
+                self.assertEqual(result["sampling_errors"], [])
+                self.assertEqual(result["memory_samples"], 0)
+                self.assertFalse(result["memory_available"])
+                self.assertEqual(result["memory_status"], "UNAVAILABLE")
+                self.assertGreaterEqual(result["memory_error_count"], 2)
+                self.assertEqual(len(result["memory_sampling_errors"]), 1)
+                self.assertIsNone(result["peak_bytes"])
+                self.assertIsNone(result["proc_vm_hwm_peak_bytes"])
+                self.assertIsNone(result["sampled_current_max_bytes"])
+                self.assertEqual(result["wait4_max_rss_bytes"], 262144 * 1024)
+
+    def test_memory_gap_keeps_prior_peak_and_later_valid_samples(self):
+        with self.observed_process(hwm_kib=32768, rss_kib=16384, wait4_kib=262144) as (
+            process,
+            counters,
+        ):
+            counters["status_text"] = "Name:\tselected core\n"
+            missing = process.boundary("ready")
+            self.assertIsNone(missing["rss"])
+            self.assertEqual(process.record["memory_status"], "PARTIAL")
+            counters.pop("status_text")
+            counters.update(hwm=65536, rss=49152)
+            process.sample()
+            result = process.close()
+            self.assertEqual(result["status"], "PASS")
+            self.assertEqual(result["memory_samples"], 2)
+            self.assertEqual(result["samples"], 3)
+            self.assertEqual(result["memory_error_count"], 1)
+            self.assertEqual(result["memory_status"], "PARTIAL")
+            self.assertEqual(result["peak_bytes"], 65536 * 1024)
+            self.assertEqual(result["sampling_errors"], [])
+
+    def test_optional_diagnostics_can_join_without_any_rss_triggers(self):
+        diagnostic = Mock()
+        diagnostic.record = {"enabled": True, "snapshots": []}
+        diagnostic.close.return_value = {"enabled": True, "joined": True}
+        with (
+            patch(
+                "container_benchmark.process_memory.ProcessMemoryObserver",
+                return_value=diagnostic,
+            ),
+            self.observed_process(
+                hwm_kib=32768,
+                rss_kib=16384,
+                wait4_kib=32768,
+                diagnostics=True,
+                status_text="Name:\tselected core\n",
+            ) as (process, _),
+        ):
+            process.mark_stage("ready")
+            diagnostic.observe.assert_not_called()
+            result = process.close()
+            self.assertEqual(result["status"], "PASS")
+            self.assertTrue(result["memory_diagnostics"]["joined"])
+            self.assertIsNone(result["peak_bytes"])
+
+    def test_memory_unavailability_does_not_waive_changed_pid_or_bad_cpu(self):
+        for change, failure in (
+            ({"start": 11}, RuntimeError),
+            ({"user": "bad"}, ValueError),
+        ):
+            with (
+                self.subTest(change=change),
+                self.observed_process(
+                    hwm_kib=32768, rss_kib=16384, wait4_kib=32768
+                ) as (
+                    process,
+                    counters,
+                ),
+            ):
+                counters.update(status_text="Name:\tselected core\n", **change)
+                with self.assertRaises(failure):
+                    process.sample()
+                process._monitor()
+                result = process.close()
+                self.assertEqual(result["status"], "ERROR")
+                self.assertTrue(result["sampling_errors"])
 
     def test_optional_memory_diagnostics_do_not_start_by_default(self):
         with (
@@ -563,19 +688,19 @@ class NativeProcessTests(unittest.TestCase):
                 self.assertTrue(result["sigint_requested"])
                 self.assertEqual(result["forced_signals"], [])
                 self.assertEqual(result["sampling_errors"], [])
-                self.assertFalse(result["shutdown_observed"])
+                self.assertEqual(result["shutdown_observed"], resource == "status")
                 self.assertEqual(result["peak_bytes"], 32768 * 1024)
                 self.assertEqual(
                     result["shutdown_exit_races"],
-                    [
+                    []
+                    if resource == "status"
+                    else [
                         {
                             "kind": "procfs_exiting_resources_released",
                             "start": 10,
                             "state": "R",
                             "flags": 0x00400004,
-                            "sample_error": "OSError"
-                            if resource == "status"
-                            else "FileNotFoundError",
+                            "sample_error": "FileNotFoundError",
                         }
                     ],
                 )

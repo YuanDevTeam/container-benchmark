@@ -46,7 +46,15 @@ class PeerBinaryCacheTests(unittest.TestCase):
         class Builder:
             def __init__(self, root, image, **kwargs):
                 self.root = root
-                self.record = {"joined": False}
+                self.record = {
+                    "joined": False,
+                    "preparedImage": {
+                        "go": {
+                            "version": "go1.27.2",
+                            "archive_sha256": owner.go_sha256,
+                        }
+                    },
+                }
                 self.peer = SimpleNamespace(stop=Mock())
                 owner.builders.append(self)
                 owner.assertEqual(kwargs["role"], "peer-binary-builder")
@@ -92,12 +100,11 @@ class PeerBinaryCacheTests(unittest.TestCase):
     def prepare(self, name, **kwargs):
         root = self.base / name
         root.mkdir()
-        (root / "builder-tools").mkdir()
-        (root / "builder-tools/tools.deb").write_bytes(b"owned package fixture")
         (root / "go.tar.gz").write_bytes(b"owned Go archive fixture")
+        self.go_sha256 = sha256(root / "go.tar.gz")
         toolchain = {
             "version": "go1.27.2",
-            "archive_sha256": sha256(root / "go.tar.gz"),
+            "archive_sha256": self.go_sha256,
         }
         identity = cache.prepare(
             root,

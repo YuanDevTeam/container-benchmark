@@ -5,6 +5,7 @@ import unittest
 
 from container_benchmark.pressure_acceptance import (
     MIB,
+    RAW_MIHOMO_METRIC_POLICY,
     annotate_pressure_case,
     annotate_reference_acceptance,
     performance_reference,
@@ -48,6 +49,7 @@ def observation(peak=40 * MIB):
         "samples": 5,
         "peak_bytes": peak,
         "metric": "rss",
+        "unit": "bytes",
         "observation_window": "post_exec_through_shutdown_reap",
         "sigint_requested": True,
         "exit_code": 0,
@@ -57,6 +59,17 @@ def observation(peak=40 * MIB):
 
 
 class PressureAcceptanceTests(unittest.TestCase):
+    def test_missing_unit_is_not_fabricated_for_budget_or_reference_memory(self):
+        for platform in ("macos", "linux"):
+            case = measured_case()
+            measured = observation()
+            measured.update(metric="physical_footprint", peak_kind="kernel_lifetime")
+            measured.pop("unit")
+            annotate_pressure_case(case, measured, platform=platform)
+            self.assertEqual(case["memory_assessment"]["observedStatus"], "UNKNOWN")
+            self.assertIsNone(case["memory_assessment"]["peakBytes"])
+            self.assertEqual(case["pressure_met"], platform == "linux")
+
     def test_default_reference_passes_950_to_990_without_legacy_load_flag(self):
         for mode in ("tcp", "udp", "mixed"):
             for throughput in (950.0, 970.0, 989.9):
@@ -116,12 +129,13 @@ class PressureAcceptanceTests(unittest.TestCase):
             self.assertFalse(case["tcp_delivery_met"])
             self.assertFalse(case["pressure_met"])
 
-    def test_2_and_3_gbps_memory_priority_records_delivery_without_gating_it(self):
+    def test_2_and_3_gbps_overload_preserves_delivery_semantics_without_rss_gate(self):
         for rate in (2000, 3000):
             for peak, passed in (
                 (43 * MIB, True),
                 (45 * MIB, True),
-                (45 * MIB + 1, False),
+                (45 * MIB + 1, True),
+                (None, True),
             ):
                 with self.subTest(rate=rate, peak=peak):
                     case = measured_case()
@@ -145,7 +159,7 @@ class PressureAcceptanceTests(unittest.TestCase):
                     self.assertGreater(case["udp_loss_rate"], 0.2)
                     self.assertFalse(case["data_valid"])
                     self.assertFalse(case["load_reached"])
-                    self.assertEqual(case["acceptance_mode"], "memory-pressure")
+                    self.assertEqual(case["acceptance_mode"], "overload")
 
     def test_1_gbps_udp_loss_limit_is_one_percent(self):
         case = measured_case()
@@ -177,16 +191,23 @@ class PressureAcceptanceTests(unittest.TestCase):
                     annotate_pressure_case(case, measured, platform="linux")
                     self.assertFalse(case["pressure_met"])
 
-    def test_rate_specific_inclusive_memory_limit_on_every_platform(self):
+    def test_budget_is_apple_footprint_and_other_platforms_are_reference_only(self):
         for platform in ("ios", "tvos", "macos", "windows", "linux", "android"):
             targets = pressure_targets(platform)
-            self.assertEqual(
-                targets["memory_limit_bytes_by_rate_mbps"],
-                {1000: 43 * MIB, 2000: 45 * MIB, 3000: 45 * MIB},
-            )
-            self.assertTrue(targets["memory_limit_inclusive"])
-            for rate, cap in ((1000, 43 * MIB), (2000, 45 * MIB), (3000, 45 * MIB)):
-                for peak, passed in ((cap - 1, True), (cap, True), (cap + 1, False)):
+            cap = 45 * MIB
+            required = platform in ("ios", "tvos", "macos")
+            self.assertEqual(targets["memory_limit_bytes"], cap if required else None)
+            self.assertEqual(targets["memory_required"], required)
+            self.assertNotIn("memory_limit_bytes_by_rate_mbps", targets)
+            if required:
+                self.assertTrue(targets["memory_limit_inclusive"])
+            for rate in (1000, 2000, 3000):
+                for peak, passed in (
+                    (43 * MIB + 1, True),
+                    (cap - 1, True),
+                    (cap, True),
+                    (cap + 1, False),
+                ):
                     with self.subTest(platform=platform, rate=rate, peak=peak):
                         case = measured_case()
                         case.update(
@@ -196,21 +217,52 @@ class PressureAcceptanceTests(unittest.TestCase):
                             active_counters_available=True,
                             active_sent_bytes=1000,
                         )
-                        annotate_pressure_case(
-                            case, observation(peak), platform=platform
+                        measured = observation(peak)
+                        if required:
+                            measured.update(
+                                metric="physical_footprint", peak_kind="kernel_lifetime"
+                            )
+                        annotate_pressure_case(case, measured, platform=platform)
+                        self.assertEqual(
+                            case["memory_limit_bytes"], cap if required else None
                         )
-                        self.assertEqual(case["memory_limit_bytes"], cap)
-                        self.assertEqual(case["memory_limit_met"], passed)
-                        self.assertEqual(case["pressure_met"], passed)
+                        self.assertEqual(
+                            case["memory_limit_met"], passed if required else None
+                        )
+                        self.assertEqual(
+                            case["pressure_met"], passed if required else True
+                        )
                         self.assertTrue(case["memory_screening_only"])
                         self.assertIsNone(case["device_acceptance_met"])
 
-    def test_linux_rss_screening_does_not_sign_device_acceptance(self):
-        case = measured_case()
-        annotate_pressure_case(case, observation(), platform="linux")
-        self.assertTrue(case["pressure_met"])
-        self.assertTrue(case["memory_screening_only"])
-        self.assertIsNone(case["device_acceptance_met"])
+    def test_optional_linux_rss_large_or_unavailable_does_not_change_business(self):
+        for peak in (1024, 45 * MIB + 1, 512 * MIB, None, 0):
+            with self.subTest(peak=peak):
+                case, measured = measured_case(), observation(peak)
+                if peak is None:
+                    measured.update(
+                        memory_available=False,
+                        memory_status="UNAVAILABLE",
+                        memory_sampling_errors=["status-memory-unavailable"],
+                    )
+                annotate_pressure_case(case, measured, platform="linux")
+                self.assertTrue(case["pressure_met"])
+                self.assertEqual(case["peak_bytes"], peak)
+                self.assertIsNone(case["memory_limit_bytes"])
+                self.assertIsNone(case["memory_limit_met"])
+
+    def test_apple_budget_cannot_use_rss_or_sampled_footprint(self):
+        for platform in ("macos", "ios", "tvos"):
+            for metric, kind in (
+                ("rss", "kernel_lifetime"),
+                ("physical_footprint", "sampled_max"),
+            ):
+                with self.subTest(platform=platform, metric=metric, kind=kind):
+                    case, measured = measured_case(), observation(1024)
+                    measured.update(metric=metric, peak_kind=kind)
+                    annotate_pressure_case(case, measured, platform=platform)
+                    self.assertFalse(case["pressure_met"])
+                    self.assertFalse(case["memory_limit_met"])
 
     def test_1_gbps_goodput_and_packet_weighted_loss_boundaries(self):
         for goodput, passed in ((950, True), (949.999, False)):
@@ -259,12 +311,11 @@ class PressureAcceptanceTests(unittest.TestCase):
         self.assertIsNone(case["dns_target_met"])
         self.assertTrue(case["pressure_met"])
 
-    def test_unavailable_or_failed_observer_cannot_pass_memory_and_stop(self):
+    def test_failed_critical_observer_or_stop_still_cannot_pass(self):
         for changes in (
             {"status": "ERROR"},
             {"cleanup": False},
-            {"peak_bytes": None},
-            {"peak_bytes": 0},
+            {"sampling_errors": ["process-identity-changed"]},
             {"samples": 0},
             {"forced_signals": ["SIGTERM"]},
             {"exit_code": 1},
@@ -341,7 +392,8 @@ class ReferenceAcceptanceTests(unittest.TestCase):
         return vole, reference, ledger
 
     def set_loss(self, row, lost_per_10000):
-        row["cases"][0]["direction_packets"] = {
+        case = row["cases"][0]
+        case["direction_packets"] = {
             direction: {
                 "sent_packets": 10000 * factor,
                 "received_packets": (10000 - lost_per_10000) * factor,
@@ -349,6 +401,8 @@ class ReferenceAcceptanceTests(unittest.TestCase):
             }
             for direction, factor in (("up", 1), ("down", 2))
         }
+        if row["core"] == "mihomo":
+            case["raw_direction_packets"] = copy.deepcopy(case["direction_packets"])
 
     def rows(self):
         rows = []
@@ -367,6 +421,8 @@ class ReferenceAcceptanceTests(unittest.TestCase):
                 active_counters_available=True,
                 active_sent_bytes=1000,
                 active_received_bytes=900,
+                sent_bytes=1000,
+                received_bytes=900,
                 actual_seconds=63,
                 load_seconds=60,
                 flows=64,
@@ -392,6 +448,9 @@ class ReferenceAcceptanceTests(unittest.TestCase):
                     },
                 },
             )
+            if core == "mihomo":
+                case["reference_metric_policy"] = RAW_MIHOMO_METRIC_POLICY
+                case["raw_direction_packets"] = copy.deepcopy(case["direction_packets"])
             measured = observation(peak)
             annotate_pressure_case(case, measured, platform="linux")
             rows.append(
@@ -529,8 +588,8 @@ class ReferenceAcceptanceTests(unittest.TestCase):
                     "strict" if candidate_mbps >= 950 else "relative_10pct_fallback",
                 )
 
-    def test_fallback_does_not_waive_integrity_dns_memory_or_lifecycle(self):
-        for failure in ("payload", "tcp", "dns", "rss", "stop", "tun", "reference"):
+    def test_fallback_does_not_waive_integrity_dns_or_lifecycle(self):
+        for failure in ("payload", "tcp", "dns", "stop", "tun", "reference"):
             with self.subTest(failure=failure):
                 vole, reference, ledger = self.optimization_rows()
                 self.set_loss(vole, 5500)
@@ -542,8 +601,6 @@ class ReferenceAcceptanceTests(unittest.TestCase):
                     case["tcp"]["complete"] = False
                 elif failure == "dns":
                     case["dns"]["data_valid"] = False
-                elif failure == "rss":
-                    vole["measurement"]["peak_bytes"] = 43 * MIB + 1
                 elif failure == "stop":
                     vole["measurement"]["exit_code"] = 9
                 elif failure == "tun":
@@ -607,6 +664,10 @@ class ReferenceAcceptanceTests(unittest.TestCase):
                 direction.update(
                     loss_packets=lost, received_packets=direction["sent_packets"] - lost
                 )
+        reference_case = reference["cases"][0]
+        reference_case["raw_direction_packets"] = copy.deepcopy(
+            reference_case["direction_packets"]
+        )
         vole["cases"][0]["goodput_mbps"] = 980
         result = annotate_reference_acceptance(vole, reference)
         self.assertTrue(result["met"])
@@ -622,6 +683,9 @@ class ReferenceAcceptanceTests(unittest.TestCase):
                     loss_packets=lost * multiplier,
                     received_packets=direction["sent_packets"] - lost * multiplier,
                 )
+        reference_case["raw_direction_packets"] = copy.deepcopy(
+            reference_case["direction_packets"]
+        )
         result = annotate_reference_acceptance(vole, reference)
         self.assertTrue(result["met"])
         self.assertEqual(result["goodput_target_mbps"], 950)
@@ -669,9 +733,9 @@ class ReferenceAcceptanceTests(unittest.TestCase):
             ("measurement", "sigint_requested", False),
             ("case", "load_window_observed", False),
             ("case", "active_counters_available", False),
-            ("case", "active_received_bytes", 0),
+            ("case", "active_received_bytes", None),
             ("case", "goodput_mbps", None),
-            ("tcp", "available", False),
+            ("case", "reference_metric_policy", None),
             ("tun", "cleanup", False),
         )
         for scope, key, value in changes:
@@ -700,7 +764,7 @@ class ReferenceAcceptanceTests(unittest.TestCase):
         case = reference["cases"][0]
         case.update(data_valid=False, payload_valid=False)
         case["errors"] = {"payload_errors": 3}
-        for direction in case["direction_packets"].values():
+        for direction in case["raw_direction_packets"].values():
             direction.update(
                 loss_packets=0, received_packets=direction["sent_packets"] + 3
             )
@@ -733,7 +797,71 @@ class ReferenceAcceptanceTests(unittest.TestCase):
         self.assertFalse(annotate_reference_acceptance(vole, reference)["met"])
         vole["cases"][0].pop("errors")
         case["direction_packets"]["up"]["loss_packets"] = -3
+        self.assertTrue(annotate_reference_acceptance(vole, reference)["met"])
+        case["raw_direction_packets"]["up"]["received_packets"] = -3
         self.assertFalse(annotate_reference_acceptance(vole, reference)["met"])
+
+    def test_reference_counts_partial_and_zero_io_without_content_or_quota_gates(self):
+        vole, reference = self.rows()
+        case = reference["cases"][0]
+        case.update(
+            data_valid=False,
+            payload_valid=False,
+            driver_complete=False,
+            goodput_mbps=0,
+            active_sent_bytes=1,
+            active_received_bytes=0,
+            sent_bytes=1,
+            received_bytes=0,
+            tcp={"available": True, "sent_bytes": 0, "complete": False},
+            dns={"available": True, "load_reached": False, "data_valid": False},
+            direction_packets={},
+            raw_direction_packets={
+                "up": {
+                    "sent_packets": 1,
+                    "received_packets": 0,
+                    "planned_packets": 1000,
+                    "unsent_packets": 999,
+                },
+                "down": {
+                    "sent_packets": 0,
+                    "received_packets": 0,
+                    "planned_packets": 2000,
+                    "unsent_packets": 2000,
+                },
+            },
+        )
+        annotate_pressure_case(case, reference["measurement"], platform="linux")
+        self.assertIsNone(case["pressure_met"])
+        self.assertEqual(case["udp_loss_rate"], 1)
+        result = annotate_reference_acceptance(vole, reference)
+        self.assertTrue(result["observations_met"])
+        self.assertTrue(result["met"])
+        self.assertEqual(result["reference_goodput_mbps"], 0)
+        self.assertEqual(result["reference_udp_loss_rate"], 1)
+        self.assertEqual(result["reference_udp_counts"], (1, 1))
+        self.assertEqual(result["performance_reference"]["throughput_target_mbps"], 0)
+
+        case["raw_direction_packets"]["up"]["sent_packets"] = 0
+        result = annotate_reference_acceptance(vole, reference)
+        self.assertFalse(result["observations_met"])
+        self.assertFalse(result["met"])
+        self.assertNotIn("reference_udp_loss_rate", result)
+
+    def test_legacy_reference_preserves_original_positive_window_and_unique_loss(self):
+        vole, reference = self.rows()
+        case = reference["cases"][0]
+        del case["reference_metric_policy"]
+        for direction in case["raw_direction_packets"].values():
+            direction["received_packets"] = direction["sent_packets"]
+        result = annotate_reference_acceptance(vole, reference)
+        self.assertTrue(result["met"])
+        self.assertEqual(result["reference_udp_counts"], (3000, 75))
+        self.assertNotIn("reference_metric_policy", result)
+        case.update(active_received_bytes=0, goodput_mbps=0)
+        result = annotate_reference_acceptance(vole, reference)
+        self.assertFalse(result["observations_met"])
+        self.assertFalse(result["met"])
 
     def test_weighted_loss_uses_integer_ratio_including_the_exact_boundary(self):
         vole, reference = self.rows()
@@ -749,6 +877,10 @@ class ReferenceAcceptanceTests(unittest.TestCase):
                 }
                 for key, (sent, lost) in zip(("up", "down"), directions, strict=True)
             }
+            if row is reference:
+                row["cases"][0]["raw_direction_packets"] = copy.deepcopy(
+                    row["cases"][0]["direction_packets"]
+                )
         self.assertTrue(annotate_reference_acceptance(vole, reference)["met"])
         down = vole["cases"][0]["direction_packets"]["down"]
         down.update(loss_packets=19, received_packets=581)
@@ -774,7 +906,7 @@ class ReferenceAcceptanceTests(unittest.TestCase):
             ("", "workload", {}),
             ("comparison_context", "traffic_sha256", "different"),
             ("comparison_context", "geodata", {}),
-            ("measurement", "peak_bytes", 43 * MIB + 1),
+            ("measurement", "sampling_errors", ["identity-changed"]),
             ("measurement", "cleanup", False),
             ("measurement", "exited_before_close", True),
             ("measurement", "forced_signals", ["SIGTERM"]),
@@ -824,12 +956,14 @@ class IndependentAcceptanceAxesTests(unittest.TestCase):
                         complete=False, received_bytes=900, loss_bytes=100
                     )
                 else:
-                    vole["measurement"]["peak_bytes"] = 44 * MIB
+                    vole["measurement"]["peak_bytes"] = 45 * MIB + 1
                 result = annotate_reference_acceptance(vole, reference)
                 self.assertTrue(result["observations_met"])
                 self.assertEqual(result["performance_status"], "PASS")
                 self.assertEqual(result["performance_reference"]["basis"], "mihomo")
-                self.assertEqual(result["status"], "FAIL")
+                self.assertEqual(
+                    result["status"], "FAIL" if gate == "integrity" else "PASS"
+                )
                 self.assertFalse(vole["cases"][0]["pressure_met"])
 
     def test_unmatched_or_unobserved_reference_cannot_relax_default_reference(self):
@@ -891,10 +1025,10 @@ class IndependentAcceptanceAxesTests(unittest.TestCase):
         case.update(transport="tcp", goodput_mbps=995, data_valid=False)
         case["tcp"]["quota_complete"] = False
         case["dns"].update(data_valid=False, load_reached=False)
-        annotate_pressure_case(case, observation(44 * MIB), platform="linux")
+        annotate_pressure_case(case, observation(45 * MIB + 1), platform="linux")
         self.assertEqual(case["integrity"]["status"], "PASS")
         self.assertEqual(case["performance_reference"]["status"], "PASS")
-        self.assertFalse(case["memory_limit_met"])
+        self.assertIsNone(case["memory_limit_met"])
         self.assertFalse(case["pressure_met"])
 
     def test_udp_loss_does_not_mean_corrupted_payload_or_tcp_loss(self):
@@ -955,6 +1089,7 @@ class IndependentAcceptanceAxesTests(unittest.TestCase):
                 direction.update(
                     loss_packets=0, received_packets=direction["sent_packets"]
                 )
+        peer["raw_direction_packets"] = copy.deepcopy(peer["direction_packets"])
         result = annotate_reference_acceptance(vole, reference)
         self.assertTrue(result["met"])
         self.assertEqual(result["reference_integrity_status"], "FAIL")

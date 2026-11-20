@@ -14,7 +14,6 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from container_benchmark import containers, download_cache, ownership, session
-from container_benchmark import guest_architecture as arch
 from container_benchmark.interop import mihomo_lab
 
 
@@ -73,112 +72,60 @@ class StorageTests(unittest.TestCase):
             return ""
 
         with patch.object(containers, "command", side_effect=command) as operation:
-            actual = containers.shared_image()
+            actual = containers.official_image()
         self.assertEqual(actual["tag"], "docker.io/library/ubuntu:26.04")
         self.assertEqual(actual["digest"], new_digest)
         operation.assert_any_call("image", "pull", containers.IMAGE, timeout=180)
 
-    def test_interop_image_cache_does_not_reuse_the_unversioned_entry(self):
-        new_digest = "sha256:" + "2" * 64
-        with patch.object(mihomo_lab, "CACHE", self.root / "interop"):
-            mihomo_lab.daily(
-                "image",
-                lambda _: {
-                    "tag": "docker.io/library/ubuntu:latest",
-                    "digest": "sha256:" + "1" * 64,
-                },
+    def test_interop_reuses_shared_prepared_image_and_provenance(self):
+        image = "localhost/vole-benchmark/ubuntu@sha256:" + "2" * 64
+        identity = {
+            "ref": image,
+            "packages": {"requested": ["build-essential"]},
+            "rust": {"target": "aarch64-unknown-linux-gnu"},
+        }
+        with (
+            patch.object(
+                mihomo_lab, "ensure_prepared_image", return_value=(image, identity)
+            ) as prepared,
+            patch.object(mihomo_lab, "Guest", side_effect=AssertionError),
+            patch.object(mihomo_lab, "official_rust", side_effect=AssertionError),
+        ):
+            actual_image, actual = mihomo_lab.prepare_tools(
+                SimpleNamespace(work=self.root)
             )
-            with (
-                patch.object(
-                    mihomo_lab,
-                    "command",
-                    return_value=json.dumps(
-                        [{"configuration": {"descriptor": {"digest": new_digest}}}]
-                    ),
-                ) as operation,
-                patch.object(
-                    mihomo_lab, "Guest", side_effect=RuntimeError("packages reached")
-                ) as guest,
-                self.assertRaisesRegex(RuntimeError, "packages reached"),
-            ):
-                mihomo_lab.prepare_tools(SimpleNamespace(work=self.root))
-            operation.assert_any_call("image", "pull", containers.IMAGE, timeout=180)
-            self.assertEqual(
-                guest.call_args.args[1], "docker.io/library/ubuntu@" + new_digest
+        prepared.assert_called_once_with(self.root, extra_packages=())
+        self.assertEqual(actual_image, image)
+        self.assertEqual(actual["image"], identity)
+        self.assertEqual(actual["packages"], identity["packages"])
+        self.assertEqual(actual["rust"], identity["rust"])
+        self.assertFalse((self.root / "builder-tools").exists())
+        self.assertFalse((self.root / "rust.tar.xz").exists())
+
+    def test_interop_extra_dependencies_reach_the_prepared_image_fingerprint(self):
+        identity = {"packages": {}, "rust": {}}
+        with patch.object(
+            mihomo_lab, "ensure_prepared_image", return_value=("prepared", identity)
+        ) as prepared:
+            mihomo_lab.prepare_tools(
+                SimpleNamespace(work=self.root), extra_packages=("ethtool",)
             )
+        prepared.assert_called_once_with(self.root, extra_packages=("ethtool",))
 
-    def test_interop_cached_image_pulls_missing_frozen_digest(self):
-        digest = "sha256:" + "2" * 64
-        image = "docker.io/library/ubuntu@" + digest
-        calls = []
-
-        def command(*arguments, **kwargs):
-            calls.append((arguments, kwargs))
-            if len(calls) == 1:
-                raise RuntimeError("pinned image missing")
-            return ""
-
-        with patch.object(mihomo_lab, "CACHE", self.root / "interop"):
-            mihomo_lab.daily(
-                "image-ubuntu-26.04-linux-" + arch.architecture(),
-                lambda _: {"tag": containers.IMAGE, "digest": digest},
-            )
-            with (
-                patch.object(mihomo_lab, "command", side_effect=command),
-                patch.object(
-                    mihomo_lab, "Guest", side_effect=RuntimeError("packages reached")
-                ) as guest,
-                self.assertRaisesRegex(RuntimeError, "packages reached"),
-            ):
-                mihomo_lab.prepare_tools(SimpleNamespace(work=self.root))
-        self.assertEqual(
-            calls,
-            [
-                (("image", "inspect", image), {}),
-                (("image", "pull", image), {"timeout": 180}),
-                (("image", "inspect", image), {}),
-            ],
-        )
-        self.assertEqual(guest.call_args.args[1], image)
-
-    def test_interop_frozen_digest_pull_and_reinspection_failures_propagate(self):
-        digest = "sha256:" + "2" * 64
-        image = "docker.io/library/ubuntu@" + digest
-        for failed_call in (2, 3):
-            with (
-                self.subTest(failed_call=failed_call),
-                tempfile.TemporaryDirectory(dir=self.root) as directory,
-                patch.object(mihomo_lab, "CACHE", Path(directory) / "interop"),
-            ):
-                mihomo_lab.daily(
-                    "image-ubuntu-26.04-linux-" + arch.architecture(),
-                    lambda _: {"tag": containers.IMAGE, "digest": digest},
-                )
-                calls = []
-
-                def command(*arguments, calls=calls, failed_call=failed_call, **_):
-                    calls.append(arguments)
-                    if len(calls) == 1:
-                        raise RuntimeError("pinned image missing")
-                    if len(calls) == failed_call:
-                        raise RuntimeError("frozen digest operation failed")
-                    return ""
-
-                with (
-                    patch.object(mihomo_lab, "command", side_effect=command),
-                    patch.object(mihomo_lab, "Guest") as guest,
-                    self.assertRaisesRegex(RuntimeError, "frozen digest operation"),
-                ):
-                    mihomo_lab.prepare_tools(SimpleNamespace(work=self.root))
-                self.assertEqual(
-                    calls,
-                    [
-                        ("image", "inspect", image),
-                        ("image", "pull", image),
-                        ("image", "inspect", image),
-                    ][:failed_call],
-                )
-                guest.assert_not_called()
+    def test_interop_prepared_image_failure_prevents_guest_or_tool_fallback(self):
+        with (
+            patch.object(
+                mihomo_lab,
+                "ensure_prepared_image",
+                side_effect=RuntimeError("prepared image unavailable"),
+            ),
+            patch.object(mihomo_lab, "Guest") as guest,
+            patch.object(mihomo_lab, "official_rust") as rust,
+            self.assertRaisesRegex(RuntimeError, "prepared image unavailable"),
+        ):
+            mihomo_lab.prepare_tools(SimpleNamespace(work=self.root))
+        guest.assert_not_called()
+        rust.assert_not_called()
 
     def test_daily_hit_keeps_shared_payload_separate_from_consumer(self):
         with patch.object(download_cache, "today", return_value="2026-10-05"):
@@ -303,6 +250,24 @@ class StorageTests(unittest.TestCase):
         self.assertIn("Cleanup: complete", run.report.read_text())
         self.assertEqual(sys.dont_write_bytecode, previous_bytecode)
         self.assertEqual({name: os.environ.get(name) for name in previous}, previous)
+
+    def test_unconfirmed_device_cleanup_retains_evidence_and_restores_environment(self):
+        previous = os.environ.get("BENCHMARK_WORK_DIR")
+        with (
+            patch.object(session, "BENCHMARK_ROOT", self.root),
+            patch.object(session.ownership, "cleanup", return_value=[]) as cleanup,
+            contextlib.redirect_stdout(io.StringIO()),
+            self.assertRaisesRegex(RuntimeError, "device stop could not be confirmed"),
+            session.Session(["apple-http"]) as run,
+        ):
+            (run.work / "summary.md").write_text("device diagnosis preserved")
+            (run.work / "device-report.json").write_text('{"final": false}')
+            run.retain_work_reason = "device stop could not be confirmed"
+        cleanup.assert_called_once_with(run.work)
+        self.assertTrue((run.work / "device-report.json").is_file())
+        self.assertIn("device diagnosis preserved", run.report.read_text())
+        self.assertIn("scratch retained", run.report.read_text())
+        self.assertEqual(os.environ.get("BENCHMARK_WORK_DIR"), previous)
 
     def test_cleanup_changes_only_registered_matching_container(self):
         work = self.owned_work()

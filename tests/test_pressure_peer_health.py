@@ -28,7 +28,14 @@ def memory_snapshot(*, status="PASS", oom=0, oom_kill=0):
 
 class PeerHealthTests(unittest.TestCase):
     def missing_udp_snapshot(
-        self, root, read_table, *, diag=None, children=None, namespace=None
+        self,
+        root,
+        read_table,
+        *,
+        diag=None,
+        children=None,
+        namespace=None,
+        protocol="udp",
     ):
         (root / "peer").mkdir()
         (root / "peer/ready").touch()
@@ -38,7 +45,14 @@ class PeerHealthTests(unittest.TestCase):
                     "pid": 10,
                     "start": "100",
                     "processes": children
-                    or [{"index": 0, "pid": 11, "start": "101", "udp_ports": [26086]}],
+                    or [
+                        {
+                            "index": 0,
+                            "pid": 11,
+                            "start": "101",
+                            protocol + "_ports": [26086],
+                        }
+                    ],
                 }
             )
         )
@@ -78,6 +92,120 @@ class PeerHealthTests(unittest.TestCase):
             ),
         ):
             return health.snapshot(root)
+
+    def test_tcp_listener_query_uses_expected_port_and_target_namespace(self):
+        reply = SimpleNamespace(
+            returncode=0,
+            stdout=b"LISTEN 0 4096 *:26086 *:* ino:24646\n",
+            cleanup=True,
+            reason=None,
+        )
+        with (
+            patch.object(processes, "run_command", return_value=reply) as command,
+            patch.object(
+                Path, "readlink", side_effect=[Path("net:[99]"), Path("net:[100]")]
+            ),
+        ):
+            health.inet_diag(11, "tcp", [26086], limit=65536, listen_only=True)
+        command.assert_called_once_with(
+            [
+                "nsenter",
+                "-t",
+                "11",
+                "-n",
+                "ss",
+                "-H",
+                "-O",
+                "-l",
+                "-t",
+                "-n",
+                "-e",
+                "( sport = :26086 )",
+            ],
+            timeout=1,
+            limit=65536,
+        )
+
+    def test_tcp_listeners_share_only_their_own_namespace_dump(self):
+        for shared in (True, False):
+
+            def query(pid, *_args, **_kwargs):
+                output = "LISTEN 0 4096 *:26086 *:* ino:24646\n" if pid == 11 else ""
+                return {
+                    "returncode": 0,
+                    "output": output,
+                    "reason": None,
+                    "cleanup": True,
+                    "filter_truncated": False,
+                }
+
+            diag = Mock(side_effect=query)
+
+            def namespace(path, shared=shared):
+                return Path(
+                    "net:[99]" if shared or path.parts[2] == "11" else "net:[100]"
+                )
+
+            with (
+                self.subTest(shared=shared),
+                tempfile.TemporaryDirectory() as folder,
+                patch.object(
+                    health, "scan_ports", side_effect=AssertionError("full table scan")
+                ),
+                patch.object(
+                    health, "missing_evidence", return_value={"fixture": True}
+                ),
+            ):
+                result = self.missing_udp_snapshot(
+                    Path(folder),
+                    lambda _name: b"header\n",
+                    protocol="tcp",
+                    diag=diag,
+                    namespace=namespace,
+                    children=[
+                        {
+                            "index": i,
+                            "pid": 11 + i,
+                            "start": "101",
+                            "tcp_ports": [26086],
+                        }
+                        for i in range(2)
+                    ],
+                )
+            self.assertEqual(diag.call_count, 1 if shared else 2)
+            self.assertEqual(result["status"], "PASS" if shared else "ERROR")
+            first, second = result["processes"]
+            self.assertEqual(first["listeners"]["tcp"]["missing"], [])
+            self.assertEqual(
+                second["listeners"]["tcp"]["missing"], [] if shared else [26086]
+            )
+            tables = first["listeners"]["tcp"]["first_scan"]["tables"]
+            self.assertEqual(tables[0]["selected_rows"][0]["inode"], "24646")
+
+    def test_later_tcp_diagnostic_cannot_rescue_a_missing_first_listener(self):
+        def query(*_args, **options):
+            return {
+                "returncode": 0,
+                "output": ""
+                if options.get("listen_only")
+                else "LISTEN 0 4096 *:26086 *:* ino:12345\n",
+                "reason": None,
+                "cleanup": True,
+                "filter_truncated": False,
+            }
+
+        table = (
+            b"header\n0: 00000000:65E6 00000000:0000 0A "
+            b"00000000:00000000 00:00000000 00000000 0 0 12345\n"
+        )
+        with tempfile.TemporaryDirectory() as folder:
+            result = self.missing_udp_snapshot(
+                Path(folder), lambda _name: table, protocol="tcp", diag=query
+            )
+        self.assertEqual(result["status"], "ERROR")
+        listener = result["processes"][0]["listeners"]["tcp"]
+        self.assertEqual(listener["missing"], [26086])
+        self.assertEqual(listener["missing_evidence"]["second_scan"]["ports"], [26086])
 
     def test_udp_gate_uses_one_inet_diag_per_namespace_not_transient_proc_scan(self):
         ports = [26086, 26088]
@@ -371,7 +499,13 @@ class PeerHealthTests(unittest.TestCase):
             )
             with (
                 patch.object(health, "process_state", return_value={"alive": True}),
-                patch.object(health, "bound_ports", return_value={26000}) as ports,
+                patch.object(health, "network_namespace", return_value="net:[99]"),
+                patch.object(
+                    health, "tcp_listener_ports", return_value={26000}
+                ) as ports,
+                patch.object(
+                    health, "missing_evidence", return_value={"fixture": True}
+                ),
             ):
                 result = health.snapshot(root)
                 self.assertEqual(result["status"], "PASS")
@@ -386,7 +520,7 @@ class PeerHealthTests(unittest.TestCase):
                         "sockstat6",
                     }.issubset(result["guest_diagnostics"])
                 )
-                ports.assert_called_once_with(11, "tcp")
+                ports.assert_called_once_with(11, {26000})
                 ports.return_value = {24501}
                 result = health.snapshot(root)
                 self.assertEqual(result["status"], "ERROR")

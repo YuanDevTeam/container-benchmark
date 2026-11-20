@@ -89,31 +89,50 @@ def _process_stat(pid: int) -> list[str]:
     return fields
 
 
+def _memory_counters(root: Path):
+    """Read optional RSS/HWM without weakening process identity or CPU reads."""
+    memory = {}
+    try:
+        for line in (root / "status").read_text().splitlines():
+            name, _, value = line.partition(":")
+            if name in ("VmRSS", "VmHWM"):
+                amount, unit = value.split()
+                if unit != "kB":
+                    raise ValueError("unexpected Linux RSS unit")
+                count = int(amount)
+                if count < 0 or count > (2**64 - 1) // 1024 or name in memory:
+                    raise ValueError("invalid Linux memory counter")
+                memory[name] = count * 1024
+        if set(memory) != {"VmRSS", "VmHWM"}:
+            raise OSError("Linux process memory counters unavailable")
+    except (OSError, ValueError) as error:
+        return None, None, f"{type(error).__name__}: {error}"[:512]
+    return memory["VmRSS"], memory["VmHWM"], None
+
+
 def sample_pid(pid: int) -> dict:
-    """Read kernel PID identity, RSS/HWM and accumulated process CPU."""
+    """Read required identity/CPU and independently available memory counters."""
     root = Path("/proc") / str(pid)
     fields = _process_stat(pid)
-    memory = {}
-    for line in (root / "status").read_text().splitlines():
-        name, _, value = line.partition(":")
-        if name in ("VmRSS", "VmHWM"):
-            amount, unit = value.split()
-            if unit != "kB":
-                raise ValueError("unexpected Linux RSS unit")
-            memory[name] = int(amount) * 1024
-    if set(memory) != {"VmRSS", "VmHWM"}:
-        raise OSError("Linux process memory counters unavailable")
     ticks = os.sysconf("SC_CLK_TCK")
     image = (root / "exe").stat()
-    return {
-        "pid": pid,
+    # stat/exe and CPU parsing remain critical. Only the status memory read is
+    # optional; it must not hide a changed PID or unreadable executable image.
+    identity_cpu = {
         "start": int(fields[19]),
-        "rss": memory["VmRSS"],
-        "peak": memory["VmHWM"],
         "user_ns": int(fields[11]) * 1_000_000_000 // ticks,
         "system_ns": int(fields[12]) * 1_000_000_000 // ticks,
         "threads": int(fields[17]),
         "executable_device_inode": f"{image.st_dev}:{image.st_ino}",
+    }
+    rss, peak, memory_error = _memory_counters(root)
+    return {
+        "pid": pid,
+        **identity_cpu,
+        "rss": rss,
+        "peak": peak,
+        "memory_available": memory_error is None,
+        "memory_error": memory_error,
     }
 
 
@@ -147,11 +166,18 @@ class NativeProcess:
             "cpu_unit": "nanoseconds",
             "sampling_interval_seconds": 0.02,
             "sampling_errors": [],
+            "memory_sampling_errors": [],
+            "memory_error_count": 0,
+            "memory_errors_truncated": False,
+            "memory_samples": 0,
+            "memory_available": False,
+            "memory_status": "OBSERVING",
             "shutdown_exit_races": [],
             "samples": 0,
-            "peak_bytes": 0,
+            "peak_bytes": None,
             "peak_sources": ["proc_vm_hwm", "proc_vm_rss"],
-            "proc_vm_hwm_peak_bytes": 0,
+            "proc_vm_hwm_peak_bytes": None,
+            "sampled_current_max_bytes": None,
             "observation_window": "post_exec_through_shutdown_reap",
             "shutdown_observed": False,
             "cleanup": False,
@@ -207,11 +233,12 @@ class NativeProcess:
                     self.child.pid, self.identity, lambda: self.stage
                 )
                 self.record["memory_diagnostics"] = self.memory_observer.record
-                self.memory_observer.observe(
-                    self.record["last_sample"],
-                    self.stage,
-                    self.last_sample_monotonic_ns,
-                )
+                if self.record["last_sample"].get("memory_available") is True:
+                    self.memory_observer.observe(
+                        self.record["last_sample"],
+                        self.stage,
+                        self.last_sample_monotonic_ns,
+                    )
             self.thread.start()
         except BaseException:
             self.close()
@@ -235,14 +262,31 @@ class NativeProcess:
             self.record["peak_threads"] = max(
                 self.record.get("peak_threads", 0), row["threads"]
             )
-            self.record["proc_vm_hwm_peak_bytes"] = max(
-                self.record["proc_vm_hwm_peak_bytes"], row["peak"]
-            )
-            self.record["peak_bytes"] = max(
-                self.record["peak_bytes"], row["peak"], row["rss"]
-            )
-            self.record["sampled_current_max_bytes"] = max(
-                self.record.get("sampled_current_max_bytes", 0), row["rss"]
+            if row["memory_available"]:
+                self.record["memory_samples"] += 1
+                self.record["memory_available"] = True
+                for key, values in (
+                    ("proc_vm_hwm_peak_bytes", (row["peak"],)),
+                    ("peak_bytes", (row["peak"], row["rss"])),
+                    ("sampled_current_max_bytes", (row["rss"],)),
+                ):
+                    previous = self.record[key]
+                    self.record[key] = max(
+                        (*values, previous) if previous is not None else values
+                    )
+            else:
+                self.record["memory_error_count"] += 1
+                errors = self.record["memory_sampling_errors"]
+                error = row["memory_error"]
+                if error not in errors:
+                    if len(errors) < 32:
+                        errors.append(error)
+                    else:
+                        self.record["memory_errors_truncated"] = True
+            self.record["memory_status"] = (
+                ("PARTIAL" if self.record["memory_error_count"] else "MEASURED")
+                if self.record["memory_available"]
+                else "UNAVAILABLE"
             )
             self.record["last_sample"] = row
             self.last_sample_monotonic_ns = time.monotonic_ns()
@@ -257,7 +301,7 @@ class NativeProcess:
                 + "\n"
             )
             self.timeline.flush()
-            if self.memory_observer is not None:
+            if self.memory_observer is not None and row["memory_available"]:
                 self.memory_observer.observe(
                     row, self.stage, self.last_sample_monotonic_ns
                 )
@@ -461,6 +505,8 @@ class NativeProcess:
                 and not self.log_thread.is_alive()
                 and diagnostics_joined
             )
+            if not self.record["memory_samples"]:
+                self.record["memory_status"] = "UNAVAILABLE"
             self.record["status"] = (
                 "PASS"
                 if self.record["cleanup"]

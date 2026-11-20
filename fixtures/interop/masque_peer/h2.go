@@ -12,11 +12,11 @@ import (
 	"net/http"
 	"os/signal"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/quic-go/quic-go/http3"
-	"github.com/quic-go/quic-go/quicvarint"
 	"golang.org/x/net/http2"
 )
 
@@ -25,7 +25,10 @@ type h2Packets struct {
 	writer http.ResponseWriter
 	parser *http3.CapsuleParser
 	mu     sync.Mutex
-	once   sync.Once
+	// All stream writers, including PMTU feedback, share mu and writeErr.
+	writeErr error
+	closed   atomic.Bool
+	once     sync.Once
 }
 
 func (c *h2Packets) ReadPacket(packet []byte) (int, error) {
@@ -50,15 +53,12 @@ func (c *h2Packets) ReadPacket(packet []byte) (int, error) {
 }
 
 func (c *h2Packets) WritePacket(packet []byte) ([]byte, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if err := http3.WriteCapsule(quicvarint.NewWriter(c.writer), 0, packet); err != nil {
-		return nil, err
-	}
-	return nil, http.NewResponseController(c.writer).Flush()
+	result := c.writeOutputBatch(singleH2OutputPacket(packet))
+	return nil, result.err
 }
 
 func (c *h2Packets) Close() {
+	c.closed.Store(true)
 	c.once.Do(func() {
 		// Both operations wake owned workers, including a stalled response write.
 		_ = http.NewResponseController(c.writer).SetWriteDeadline(time.Now())

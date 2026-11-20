@@ -20,10 +20,21 @@ from pathlib import Path
 
 from .. import container_backend
 from ..container_resources import CPUS, allocation
-from ..containers import IMAGE, ubuntu_identity
 from ..containers import command as container_command
+from ..containers import ubuntu_identity
 from ..guest_architecture import architecture, machine_name, rust_target
+from ..kernel_environment import (
+    kernel_arguments,
+    kernel_mount_arguments,
+    prepare_guest_kernel,
+    verify_guest_kernel,
+)
 from ..paths import BENCHMARK_ROOT, FIXTURE_ROOT
+from ..prepared_image import (
+    DEPENDENCY_PACKAGES,
+    ensure_prepared_image,
+    verify_prepared_guest,
+)
 from .processes import run_command
 
 CACHE = BENCHMARK_ROOT / ".cache/interop"
@@ -32,33 +43,8 @@ CONCLUSIONS = BENCHMARK_ROOT / "conclusions/interop"
 NETWORK = "benchmark-interop-nat"
 PURPOSE = "container-benchmark-interop"
 TARGET = rust_target()
-PACKAGES = (
-    "build-essential",
-    "git",
-    "clang",
-    "libclang-dev",
-    "cmake",
-    "ninja-build",
-    "pkg-config",
-    "perl",
-    "patch",
-    "curl",
-    "ca-certificates",
-    "python3",
-    "python3-hpack",
-    "file",
-    "xz-utils",
-    "zip",
-    "unzip",
-    "nftables",
-    "wireguard-tools",
-    "iproute2",
-    "iputils-ping",
-    "iptables",
-    "procps",
-    "util-linux",
-    "mount",
-)
+PACKAGES = DEPENDENCY_PACKAGES
+BASELINE_CAPABILITIES = ("SYS_MODULE",)
 
 
 def save(path, value):
@@ -275,7 +261,12 @@ class Guest:
             )
         ):
             raise ValueError("unsupported interop container capability")
-        self.record = {"role": role, "name": self.name, "joined": False}
+        self.record = {
+            "role": role,
+            "name": self.name,
+            "joined": False,
+            "baseline_capabilities": list(BASELINE_CAPABILITIES),
+        }
         if self.drop_capabilities or role in {"icmp-peer", "quic-witness-peer"}:
             self.record.update(
                 added_capabilities=list(self.capabilities),
@@ -310,7 +301,9 @@ class Guest:
         cargo = CACHE / "cargo"
         if cargo.is_symlink() or cargo.parent.is_symlink():
             raise ValueError("interop cargo cache must not use a symlink")
-        cargo.mkdir(exist_ok=True)
+        cargo.mkdir(parents=True, exist_ok=True)
+        binding = prepare_guest_kernel(self.root / "guest-kernels" / self.name)
+        self.kernel_environment = binding
         command(
             "run",
             "--detach",
@@ -325,6 +318,13 @@ class Guest:
             *self.resource_arguments,
             "--arch",
             architecture(),
+            *kernel_arguments(binding),
+            *kernel_mount_arguments(binding),
+            *[
+                argument
+                for item in BASELINE_CAPABILITIES
+                for argument in ("--cap-add", item)
+            ],
             *[
                 argument
                 for item in self.capabilities
@@ -406,6 +406,13 @@ class Guest:
             )
             if namespace is not None:
                 self.record["tun_namespace"] = namespace
+        verify_guest_kernel(
+            binding,
+            execute=self.execute,
+            record=self.record,
+            log_dir=self.root / (self.name + "-kernel"),
+        )
+        verify_prepared_guest(self, self.root / (self.name + "-prepared-image.log"))
         return self
 
     def execute(self, argv, log, *, timeout=1800):
@@ -479,109 +486,27 @@ class Guest:
 
 
 def prepare_tools(session, *, extra_packages=()):
+    """Freeze one prepared image; package installation belongs to its builder."""
     container_backend.ensure_runtime()
-    selected_packages = tuple(dict.fromkeys((*PACKAGES, *extra_packages)))
-
-    def image_refresh(_):
-        command("image", "pull", IMAGE, timeout=180)
-        digest = json.loads(command("image", "inspect", IMAGE))[0]["configuration"][
-            "descriptor"
-        ]["digest"]
-        if not re.fullmatch(r"sha256:[a-f0-9]{64}", digest):
-            raise ValueError("official Ubuntu image digest is invalid")
-        return {"tag": IMAGE, "digest": digest}
-
-    print("Protocol interop dependencies: official Ubuntu 26.04 LTS image", flush=True)
-    _, image_identity = daily(
-        "image-ubuntu-26.04-linux-" + architecture(), image_refresh
-    )
-    if image_identity.get("tag") != IMAGE:
-        raise RuntimeError("cached interop image differs from Ubuntu 26.04")
-    image = IMAGE.rsplit(":", 1)[0] + "@" + image_identity["digest"]
-    # The pinned image must still exist, including after a shared-cache hit.
-    try:
-        command("image", "inspect", image)
-    except RuntimeError:
-        command("image", "pull", image, timeout=180)
-        command("image", "inspect", image)
-
-    def packages(staging):
-        with Guest(session, image, "packages", cache=staging) as guest:
-            guest.execute(
-                ["apt-get", "update"], session.work / "apt-update.log", timeout=300
-            )
-            guest.execute(
-                [
-                    "/bin/sh",
-                    "-ec",
-                    "mkdir -p /tmp/interop-debs; "
-                    "apt-get -o Dir::Cache::archives=/tmp/interop-debs "
-                    "install --yes --download-only "
-                    + " ".join(selected_packages)
-                    + "; cp /tmp/interop-debs/*.deb /cache/",
-                ],
-                session.work / "apt-download.log",
-                timeout=600,
-            )
-        return {"image": image_identity["digest"], "packages": list(selected_packages)}
-
-    print("Protocol interop dependencies: Ubuntu build/runtime packages", flush=True)
-    package_set = hashlib.sha256(json.dumps(selected_packages).encode()).hexdigest()[
-        :12
-    ]
-    packages_path, packages_identity = daily(
-        "packages-"
-        + architecture()
-        + "-"
-        + image_identity["digest"][-12:]
-        + "-"
-        + package_set,
-        packages,
-    )
-    print("Protocol interop dependencies: official Rust stable archive", flush=True)
-    rust_path, rust_identity = official_rust()
-    (session.work / "builder-tools").mkdir()
-    for path in packages_path.glob("*.deb"):
-        shutil.copyfile(path, session.work / "builder-tools" / path.name)
-    shutil.copyfile(rust_path / "rust.tar.xz", session.work / "rust.tar.xz")
+    print("Protocol interop dependencies: prepared Ubuntu image", flush=True)
+    image, identity = ensure_prepared_image(session.work, extra_packages=extra_packages)
     return image, {
-        "image": image_identity,
-        "packages": packages_identity,
-        "rust": rust_identity,
+        "image": identity,
+        "packages": identity["packages"],
+        "rust": identity["rust"],
     }
 
 
 def install_tools(guest, *, rust=None):
-    guest.execute(
-        [
-            "/bin/sh",
-            "-ec",
-            "apt-get -o Dir::Cache::archives=/work/builder-tools "
-            "--no-download --yes install /work/builder-tools/*.deb",
-        ],
-        guest.root / (guest.name + "-install.log"),
-        timeout=300,
-    )
+    """Verify preinstalled tools; each guest keeps its image filesystem intact."""
+    verify_prepared_guest(guest, guest.root / (guest.name + "-tools-preflight.log"))
     if rust:
-        package = rust["archive_root"]
-        selected = rust["installer_files"] + [
-            package + "/" + component
-            for component in ("rustc", "cargo", "rust-std-" + TARGET)
-        ]
+        if rust.get("target") != TARGET:
+            raise ValueError("prepared Rust toolchain differs from the native target")
         guest.execute(
-            [
-                "/bin/sh",
-                "-ec",
-                "mkdir -p /work/rust-unpack; "
-                "tar -xJf /work/rust.tar.xz -C /work/rust-unpack "
-                + " ".join(selected)
-                + "; "
-                f"cd /work/rust-unpack/{package}; "
-                f"./install.sh --components=rustc,cargo,rust-std-{TARGET} "
-                "--prefix=/work/rust --disable-ldconfig",
-            ],
-            guest.root / "rust-install.log",
-            timeout=600,
+            ["/bin/sh", "-ec", "rustc -Vv; cargo --version"],
+            guest.root / (guest.name + "-rust-preflight.log"),
+            timeout=30,
         )
 
 

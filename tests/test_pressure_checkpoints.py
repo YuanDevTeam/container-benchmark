@@ -66,6 +66,28 @@ def fixture(*, modes=("tcp",), rows=None, group_status="RECORDED"):
 
 
 class PressureCheckpointTests(unittest.TestCase):
+    def test_reference_memory_is_displayed_without_a_budget_result(self):
+        from container_benchmark.memory_policy import policy_for
+
+        for peak in (80 * 1024**2, None):
+            with self.subTest(peak=peak):
+                current = formal_row()
+                current["cases"][0].update(
+                    peak_bytes=peak,
+                    memory_limit_met=None,
+                    memory_policy=policy_for("linux"),
+                    memory_assessment={"metric": "rss", "status": "NOT_APPLICABLE"},
+                )
+                report, groups = fixture(rows={"current": current})
+                result = self.save(report, groups)
+                text = (self.root / result["summary"]).read_text()
+                self.assertIn("参考 / 不设门槛", text)
+                self.assertEqual(result["status"], "PASS")
+                self.assertIsNone(result["windows"][0]["memory_limit_met"])
+                self.assertEqual(
+                    result["windows"][0]["peak_rss_mib"], 80 if peak else None
+                )
+
     def setUp(self):
         self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
 

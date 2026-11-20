@@ -1,6 +1,6 @@
 # 验证场景与验收口径
 
-所有网络业务始终使用隔离Linux容器中的真实raw-IP TUN，保留Controller、完整官方CN GeoData、正常CLI与既定服务端选择。当前默认只使用1 Gbps，2／3 Gbps、平台和真机验证继续暂缓。以下是场景选择和结果解释合同，不表示新增场景已经运行或通过；历史输入、FAIL／ERROR和通过清单保留原身份，不追溯改签。
+既有 Linux 网络验收业务使用隔离容器中的真实 raw-IP TUN，保留 Controller、完整官方 CN GeoData、正常 CLI 与既定服务端选择。独立版本的 [Mac 全负载压力](mac-full-pressure.md) 使用授权的 Mac socketpair 模拟，Linux Mihomo real-TUN 仅作该版本明确披露差异的协议容量参考。当前默认只使用1 Gbps，2／3 Gbps及其他平台和真机验证继续暂缓。以下是场景选择和结果解释合同，不表示新增场景已经运行或通过；历史输入、FAIL／ERROR和通过清单保留原身份，不追溯改签。
 
 ## 场景分层
 
@@ -20,6 +20,10 @@
 
 ## 性能参考与独立必要门禁
 
+下表的 950 Mbps 与既有 Linux 负载合同保持原范围。`mac-compound-http-https-udp-1000-mitm-js-native-v2` 独立使用公共 Rust 发生器：`js`／`mixed` 都提供相同 1 Gbps 综合负载，默认有效吞吐≥800 Mbps、适用的加权 UDP 丢包≤1%，Mac Core worker `phys_footprint`≤45 MiB。其完整性、实际处理、TLS、严格 DNS、原站封账、CN 路由、输入身份及正常 Stop／join／清理均为独立必要门禁，有限 P0 不授予完整窗口资格。全量目录的 179 个 profile 分别运行两种模式，共 358 个主窗口、28 组、6 轮；详见该版本的[公开合同与入口](mac-full-pressure.md)。
+
+该版本的 Linux Mihomo fallback 使用同一公共 Rust 负载源码和冻结 h2、真实 TUN／内核 socket，以及 `off` 原文协议处理。平台、栈、调度和处理能力差异单列。`mihomo-actual-io-v1` 只使用实际接收吞吐和 UDP 丢包率，免除内容、完整性及 DNS 配额门禁。未发送业务包单列，丢包率分母使用实际发送包数。有效参考要求计数、窗口、路由、所属路径、时钟／封账、可信二进制和 owner 正常退出证据。Linux RSS 仅作观测。详细计量、生命周期及历史边界见[参考合同](mac-full-pressure.md#linux-mihomo-协议容量参考)。
+
 | 结论 | 关注内容 | 与其他结论的关系 |
 | --- | --- | --- |
 | 完整性 `integrity` | 错误内容、错误来源，以及TCP实际已发送字节／摘要／结束状态的期限内一致性 | UDP丢包另列，不要求UDP零丢包；TCP配额不足不等于已发送字节缺失；证据不足记`UNKNOWN` |
@@ -28,11 +32,13 @@
 
 每个精确窗口优先达到或优于匹配Mihomo，独立生产候选优化最多20轮。真实TUN有实际代码候选及闭合负载结果才计轮；对照／重复、纯观测和仅编译／内存检查不算新轮。经多轮仍未达到时可记录原因提前结束，20轮则停止继续追优，不为凑数延长。
 
-阶段结束后允许最高**相对10%**差距：吞吐≥min(950 Mbps,0.9×Mihomo实测)，UDP丢包≤max(1%,min(100%,1.1×Mihomo实测))。服务端与窗口／TLS／速率／负载范围必须与实际候选、闭合结果和结束说明一致；未取得这些依据或范围不符时保持初期标准，记录严格结果、实际轮次、结束原因及降级阶段。CPU继续记录。内存、完整性、真实负载、DNS、测量、Stop／清理不放宽，历史FAIL／ERROR与原证明不改写。
+阶段结束后允许最高**相对10%**差距：吞吐≥min(950 Mbps,0.9×Mihomo实测)，UDP丢包≤max(1%,min(100%,1.1×Mihomo实测))。服务端与窗口／TLS／速率／负载范围必须与实际候选、闭合结果和结束说明一致；未取得这些依据或范围不符时保持初期标准，记录严格结果、实际轮次、结束原因及降级阶段。CPU继续记录。适用内存门禁、完整性、真实负载、DNS、测量、Stop／清理不放宽，历史FAIL／ERROR与原证明不改写。
 
-内存继续是综合验收必要门槛：**1 Gbps≤43 MiB，后续2／3 Gbps≤45 MiB**，边界包含等值，不按系统或构建切换。Linux CLI生命周期RSS只作筛查，iOS／tvOS整个VPN扩展的physical footprint仍须独立测量，不能从Linux通过推导真机通过。
+Apple内存继续是综合验收必要门槛：**全部带宽档位统一≤45 MiB（47,185,920字节）**，边界包含等值，不按构建或体验场景切换。Apple平台的新正式验收统一使用 `phys_footprint`：macOS模拟考查独立Core worker的Mach内核lifetime峰，iOS／tvOS考查整个VPN扩展的footprint。Mac最终读取覆盖初始化、业务、排空、Core stop／destroy及观察器join，其后回包与进程退出尾段不冒称已覆盖；与NE的owner范围仍分别说明。RSS继续作诊断，缺footprint、身份或最终读取证据时保持不可用，不回退RSS。
 
-当前不设置绝对容量轴或990 Mbps／0.2%的硬门槛。`performance_reference`按实际窗口和收发证据给出`PASS`／`FAIL`／`UNKNOWN`／`NOT_APPLICABLE`，记录`basis`为`default`、`mihomo`或`mihomo-fallback-10pct`及逐指标目标、实测值；降级阶段另保留严格判定和轮次证据。错误内容仍计入raw吞吐，不把坏内容吞吐冒称正确交付；性能通过不豁免完整性、内存或测量失败，也不因后者失败把性能状态改写成FAIL。若只剩实际TCP缺口，后续只处理交付，不继续追逐吞吐。
+Linux、Android、Windows客户端内存统一仅作参考，`requiredForAcceptance=false`、`limitBytes=null`，预算状态为`NOT_APPLICABLE`。RSS过大或仅内存采集不可用均不阻断其业务结论；进程身份、CPU关键观测、真实OOM／异常退出、完整负载及正常join仍独立判断。不能把这些平台的RSS／PSS／working set改名或代签Apple正式验收。统一接口见[客户端内存政策](client-memory.md)。历史报告保留当时指标、门槛、实测值和原判定；旧RSS FAIL不因新政策追改PASS，旧诊断窗的1Hz footprint采样也不补签新正式资格。新评估使用新指标与统一上限，本次合同调整本身不表示已恢复或新增任何压力测试。
+
+当前不设置绝对容量轴或990 Mbps／0.2%的硬门槛。`performance_reference`按实际窗口和收发证据给出`PASS`／`FAIL`／`UNKNOWN`／`NOT_APPLICABLE`，记录`basis`为`default`、`mihomo`或`mihomo-fallback-10pct`及逐指标目标、实测值；降级阶段另保留严格判定和轮次证据。错误内容仍计入raw吞吐，不把坏内容吞吐冒称正确交付；性能通过不豁免完整性、适用内存门禁或测量失败，也不因后者失败把性能状态改写成FAIL。若只剩实际TCP缺口，后续只处理交付，不继续追逐吞吐。
 
 新`pressure_met`为默认950 Mbps／1%性能参考和独立必要门禁的综合判定；匹配Mihomo的`reference_acceptance`另保留综合状态及`performance_status`。`UNKNOWN`或未执行不补PASS，UDP全无接收也不能宣称内容与来源已经验证。原始`data_valid`、`load_reached`、case状态和历史`pressure_met`／`absolute_capacity`结论不改写；旧990 Mbps／0.2%及绝对容量只代表当时标准，不迁移历史FAIL／ERROR或通过清单。后续证明保存当前性能与完整性，不新增绝对容量字段。
 
@@ -42,7 +48,7 @@
 
 后续2／3 Gbps仍沿用既定过载口径：允许断连、丢包和有界队列保护内存，但必须保持已接收内容与来源正确、完整负载观察及正常Stop／清理。实际TCP截断和未完成量照实保留，不强套1 Gbps的容量或完整交付门槛，也不能将过载内存通过写成无错误容量通过。
 
-Mihomo即使与listener或官方服务端存在兼容错误，仍统计其实际吞吐、CPU、RSS和丢包作为本次匹配对照；完整性错误独立保留。吞吐包含错误数据和错误返回前的部分I/O；历史字段`goodput_mbps`沿用名称，表示活动窗口raw接收吞吐，不表示正确交付速率。UDP丢包仍使用实际发送与唯一有效接收量，坏包和重复包不会抵消交付缺口。Vole自身错误内容或来源不能获得综合通过，不能引用Mihomo错误豁免。
+Mihomo 匹配对照按照实际接收吞吐和 UDP 丢包率判定。吞吐统计活动期内实际接收的载荷，包含错误返回前的部分 I/O。UDP 各方向使用实际已发包数和原始接收包数计算丢包，再按已发包数加权。预定但未发出的包独立记录。Mihomo 的完整性诊断、CPU 和 RSS 照常记录。Vole 的综合验收继续使用自身的内容、来源和唯一有效接收证据。
 
 准备失败、进程观测无效或缺失收发证据，分别记录ERROR／不可用和缺口，不伪造零吞吐、零丢包或完整性通过。归因仍先区分Core、对端和benchmark；失败本身不改变既定服务端顺序。
 
@@ -61,6 +67,6 @@ Mihomo即使与listener或官方服务端存在兼容错误，仍统计其实际
 
 ## 结果与后续范围
 
-当前 Linux CLI 1 Gbps 的已接受覆盖及原始 FAIL／ERROR 边界见[最终覆盖结论](../conclusions/full-pressure-final.md)，协议事实见[协议结果](protocol-results.md)，未解决问题见[已知问题](known-issues.md)。分源码有效覆盖不表示所有历史库存均为最终源码 PASS；后续通过不重写旧结果或未知归因。
+Linux CLI 1 Gbps 的历史覆盖和验证边界见 [协议结果](protocol-results.md) 与 [已知问题](known-issues.md)。历史记录保留原测量版本与判定。
 
 新的验证仍按单组最多 10 个同一代理协议组合、组内和组间串行编排，每五组或尾批保存结论。公共层变化须显式复验受影响的既有 PASS，包括主清单之外确实受影响的保护项。断点只跳过该批有效通过的精确窗口；性能通过即结束该项性能优化，完整性及其他门禁独立处理。平台、真机、2／3 Gbps、高并发及 Linux system／DHCP 专项继续暂缓。

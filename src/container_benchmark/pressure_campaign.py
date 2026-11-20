@@ -76,6 +76,7 @@ def pending_profiles(parsed, history):
                     selected_server=selected_server,
                     workload=vars(declared),
                     queue_length=comparison.QUEUE_LENGTH,
+                    execution_scope=comparison.linux_client_execution(),
                     **peer,
                 ):
                     skipped.append(

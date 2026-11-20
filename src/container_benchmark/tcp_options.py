@@ -22,12 +22,11 @@ import time
 from pathlib import Path
 
 from .guest_architecture import architecture
-from .inputs import save, sha256
-from .paths import BENCHMARK_ROOT, FIXTURE_ROOT
+from .inputs import save
+from .paths import FIXTURE_ROOT
 
-KERNEL = "7.3.0-vole-kata430"
 TCP_CONGESTION, TCP_INFO, TCP_IS_MPTCP = 13, 11, 43
-MODULE_PATH = BENCHMARK_ROOT / ".cache/kernels/kata-4.3.0-7.3-arm64/brutal.ko"
+MODULE_PATH = Path("/opt/benchmark-kernel/brutal.ko")
 BRUTAL_BPS = 375_000_000  # 3 Gbps per direction; independent of offered load.
 MPTCP_PROFILE = "vless-tcp-plain-mptcp"
 BRUTAL_PROFILE = "vless-tcp-tls-h2mux-brutal"
@@ -105,6 +104,15 @@ def isolated():
         raise RuntimeError("TCP option observation requires the owned Linux guest")
 
 
+def kernel_release():
+    release = os.environ.get("BENCHMARK_KERNEL_RELEASE", "")
+    if re.fullmatch(r"7\.3\.[1-9][0-9]*-vole-kata430", release) is None:
+        raise RuntimeError(
+            "TCP options require the frozen shared stable kernel release"
+        )
+    return release
+
+
 def module_identity(path):
     with Path(path).open("rb") as source:
         raw = source.read(8 * 1024**2 + 1)
@@ -113,8 +121,8 @@ def module_identity(path):
     if struct.unpack_from("<H", raw, 18)[0] != 183:
         raise ValueError("TCP Brutal module is not ARM64")
     match = re.search(rb"vermagic=([^\0]+)\0", raw)
-    if match is None or not match[1].startswith((KERNEL + " ").encode()):
-        raise ValueError("TCP Brutal module vermagic differs from the fixed kernel")
+    if match is None or not match[1].startswith((kernel_release() + " ").encode()):
+        raise ValueError("TCP Brutal module vermagic differs from the frozen kernel")
     if not raw.endswith(b"~Module signature appended~\n"):
         raise ValueError("TCP Brutal module must retain its verified signature")
     return {
@@ -142,8 +150,9 @@ def brutal_socket(stream):
 
 def module_action(action, state_path, expected=None):
     isolated()
-    if os.uname().machine != "aarch64" or os.uname().release != KERNEL:
-        raise RuntimeError("TCP Brutal fixture requires the fixed ARM64 guest kernel")
+    release = kernel_release()
+    if os.uname().machine != "aarch64" or os.uname().release != release:
+        raise RuntimeError("TCP Brutal fixture requires the frozen ARM64 guest kernel")
     state_path = Path(state_path).resolve()
     if not state_path.is_relative_to("/run/benchmark"):
         raise ValueError("module ownership state must remain in the owned guest mount")
@@ -151,7 +160,7 @@ def module_action(action, state_path, expected=None):
         save(
             state_path,
             {
-                "kernel": KERNEL,
+                "kernel": release,
                 "module_loaded": Path("/sys/module/brutal").exists(),
                 "loaded_by_fixture": False,
                 "requested": False,
@@ -172,7 +181,7 @@ def module_action(action, state_path, expected=None):
             finally:
                 os.close(fd)
         state = {
-            "kernel": KERNEL,
+            "kernel": release,
             **identity,
             "loaded_by_fixture": loaded,
             "module_loaded": True,
@@ -224,7 +233,12 @@ def module_context(guest, *, enabled=True, label="tcp-brutal"):
         )
     if not re.fullmatch(r"[a-z0-9-]{1,48}", label):
         raise ValueError("unsafe TCP module ownership label")
-    expected = sha256(MODULE_PATH) if enabled else ""
+    if enabled:
+        if guest.record.get("kernelPreflight", {}).get("status") != "PASS":
+            raise RuntimeError("TCP Brutal requires the shared guest kernel preflight")
+        expected = guest.record["kernelEnvironment"]["artifacts"]["module"]["sha256"]
+    else:
+        expected = ""
     state = Path(guest.root) / (label + "-module.json")
     if state.exists():
         raise ValueError("TCP module ownership state already exists")

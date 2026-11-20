@@ -188,6 +188,12 @@ def configure(root, guest, *, port=PORT, instance=None):
             "argv": ["python3", "-m", __name__, "--serve", "/work"],
             "ready_files": ["/work/peer/wg-ready"],
             "udp_ports": [port],
+            "identity_children": [
+                {
+                    "argv": ["/work/artifacts/wireguard-go", "-f", device],
+                    "ownerFile": "peer/wg-owner.json",
+                }
+            ],
         }
     ]
 
@@ -214,8 +220,43 @@ def _ipv4_forwarding():
             raise RuntimeError("owned WireGuard IPv4 forwarding was not restored")
 
 
-def serve(root):
+@contextmanager
+def _owned_backend(root, argv, record):
+    """Export the actual nested owner and its joined result, without key data."""
     from .interop.processes import SERVER_LOG_LIMIT, OwnedProcess
+    from .pressure_peer_health import bounded_text
+
+    identity = None
+    try:
+        with OwnedProcess(
+            argv,
+            root / "peer/wireguard.log",
+            record,
+            limit=SERVER_LOG_LIMIT,
+            truncate_on_overflow=True,
+        ) as process:
+            pid = process.process.pid
+            fields = (
+                bounded_text(Path("/proc") / str(pid) / "stat", 4096)
+                .rpartition(") ")[2]
+                .split()
+            )
+            identity = {
+                "pid": pid,
+                "start": fields[19],
+                "parentPID": os.getpid(),
+                "joined": False,
+            }
+            if int(fields[1]) != identity["parentPID"]:
+                raise RuntimeError("WireGuard backend has an unexpected parent")
+            save(root / "peer/wg-owner.json", identity)
+            yield process
+    finally:
+        if identity is not None:
+            save(root / "peer/wg-joined.json", {**identity, **record})
+
+
+def serve(root):
 
     stop = threading.Event()
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
@@ -241,12 +282,10 @@ def serve(root):
     record = {}
     with (
         _ipv4_forwarding(),
-        OwnedProcess(
+        _owned_backend(
+            root,
             [str(root / "artifacts/wireguard-go"), "-f", interface],
-            root / "peer/wireguard.log",
             record,
-            limit=SERVER_LOG_LIMIT,
-            truncate_on_overflow=True,
         ) as process,
     ):
         deadline = time.monotonic() + 20

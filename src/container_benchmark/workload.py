@@ -781,6 +781,41 @@ def directional_packets(traffic: list) -> dict:
     return counts
 
 
+def raw_directional_packets(traffic: list) -> dict:
+    """Count actual UDP I/O independently of payload and sequence verdicts."""
+    directions = {"up": [], "down": []}
+    for branch in traffic:
+        for row in branch.get("flows", []):
+            if row.get("transport") != "udp":
+                continue
+            direction = row.get("direction")
+            if direction not in directions:
+                return {}
+            directions[direction].append(row)
+
+    def total(values):
+        return (
+            sum(values)
+            if all(type(value) is int and value >= 0 for value in values)
+            else None
+        )
+
+    counts = {}
+    for direction, rows in directions.items():
+        sent = total([row.get("sent", {}).get("packets") for row in rows])
+        received = total([row.get("received", {}).get("packets") for row in rows])
+        planned = total([row.get("expected_udp_packets") for row in rows])
+        counts[direction] = {
+            "sent_packets": sent,
+            "received_packets": received,
+            "planned_packets": planned,
+            "unsent_packets": max(0, planned - sent)
+            if planned is not None and sent is not None
+            else None,
+        }
+    return counts
+
+
 def _traffic_argv(root, args, transport, tun, witness, origin, source, *, probe=False):
     """Control TCP bypasses TUN; named data first uses controlled DNS through TUN."""
     return [
@@ -1340,7 +1375,7 @@ def fixed_args(rate, seconds=60, transport="all", dns_qps=1000):
 
 @contextlib.contextmanager
 def origins(root, witnesses, image):
-    """Two stock Ubuntu LTS origin guests, separate from the tested kernel."""
+    """Two origins using the shared prepared Ubuntu image and verified kernel."""
     from .inputs import save
     from .linux_builder import LinuxGuest, install_tools
     from .paths import FIXTURE_ROOT

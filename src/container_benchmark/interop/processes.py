@@ -15,6 +15,9 @@ from pathlib import Path
 from ..processes import KILL_SIGNAL, process_group_options, signal_process_group
 
 SERVER_LOG_LIMIT = 10 * 1024**2
+EXPLICIT_STOP_MODE = "explicit-first-term-deadline-v1"
+EXPLICIT_STOP_PENDING = "explicit-first-term-deadline-pending-v1"
+EXPLICIT_STOP_FAILED = "explicit-first-term-deadline-failed-v1"
 
 
 class OwnedProcess:
@@ -40,6 +43,9 @@ class OwnedProcess:
         self.stdin = stdin
         self.reader = None
         self.overflow = threading.Event()
+        self._stop_mode = None
+        self._term_deadline = None
+        self._kill_requested = False
 
     def __enter__(self):
         self.record.update(started=False, joined=False)
@@ -89,9 +95,52 @@ class OwnedProcess:
             self.process.stdout.close()
 
     def _signal(self, value):
+        if value == KILL_SIGNAL:
+            # A reader can race explicit stop activation. Never clear this bit.
+            self._kill_requested = True
+            if self._stop_mode is not None:
+                self.record["kill_requested"] = True
         signal_process_group(self.process, value)
 
+    def request_stop(self):
+        """Opt this live owner into one TERM and its absolute five-second bound."""
+        if self._stop_mode is not None or self.process.poll() is not None:
+            return False
+        self._stop_mode = EXPLICIT_STOP_PENDING
+        self.record["stop_mode"] = EXPLICIT_STOP_PENDING
+        # KILL may precede activation or run between these statements. setdefault
+        # retains a reader's True instead of overwriting it with a stale False.
+        self.record.setdefault("kill_requested", self._kill_requested)
+        try:
+            requested = time.monotonic()
+            self._signal(signal.SIGTERM)
+        except BaseException as error:
+            self._stop_mode = EXPLICIT_STOP_FAILED
+            self.record.update(
+                stop_mode=EXPLICIT_STOP_FAILED,
+                stop_request_error=type(error).__name__,
+            )
+            raise
+        self._term_deadline = requested + 5
+        self._stop_mode = EXPLICIT_STOP_MODE
+        self.record.update(
+            stop_mode=EXPLICIT_STOP_MODE,
+            term_requested_monotonic=requested,
+            term_deadline_monotonic=self._term_deadline,
+        )
+        return True
+
     def _terminate(self):
+        if self._stop_mode == EXPLICIT_STOP_MODE:
+            if self.process.poll() is None:
+                remaining = max(0, self._term_deadline - time.monotonic())
+                try:
+                    self.process.wait(timeout=remaining)
+                except subprocess.TimeoutExpired:
+                    self._signal(KILL_SIGNAL)
+                    self.process.wait(timeout=5)
+            return
+        # Owners without an explicit request retain the original stop contract.
         if self.process.poll() is None:
             self._signal(signal.SIGTERM)
             try:

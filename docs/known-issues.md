@@ -1,16 +1,16 @@
 # 已知问题与验证边界
 
-本页保留最终问题、责任边界和未验范围；运行日志、候选补丁、抓包、采样与逐轮过程已清理。通过性能参考不等于根因已修复，也不豁免内容、TCP实际交付或内存门槛。
+本页保留最终问题、责任边界和未验范围；运行日志、候选补丁、抓包、采样与逐轮过程已清理。通过性能参考不等于根因已修复，也不豁免内容、TCP实际交付或适用平台的内存门槛。
 
-## 当前压力接受范围
+## Linux 历史覆盖
 
-主465项和额外5项按各自实测来源及现行标准通过，详见[最终四指标](protocol-results.md)。这不是全部540项在同一最终二进制下重测通过，其余70项仅有历史身份，未签当前源码。主清单原11项未通过和原准备ERROR的结论保留，没有重写为当时已通过。
+Linux 1 Gbps 的历史通过结果覆盖 465 个主窗口及 5 个额外窗口，账本保留每窗的实测来源与判定。 [逐窗指标](protocol-results.md)
 
 ## Mieru
 
 旧集中处置24项为23项性能有效通过，1项UDP载体标准编码TCP的对端／期限完整性FAIL。唯一701,216字节缺口与服务端正常Close时退休的535片连续DATA直接关联；这不解释首洞起因或所有自然EOF／上传期限停滞。其他EOF、原A2上传期限和少注入对照仍为UNKNOWN；健康复测不是故障修复。
 
-已确认的Mihomo listener NAT错回和在途Close边界，分别保留[选端例外事实](../conclusions/mieru-tcp-nat-alias.md)与[Close边界](../conclusions/mieru-sdk-close-current.md)。按这些明确例外使用官方Mieru服务端；其他互通失败不构成换端许可。
+已确认的Mihomo listener NAT错回和在途Close边界，记录在选端例外中。 [服务端选择](server-selection.md)
 
 UDP-pattern混合流的历史最终生产代码为36a0b6f，真实TUN 1Gbps／60秒、64流／64目标、DNS1000、IPv4／direct、队列4096，服务端为官方Mieru。
 
@@ -33,19 +33,10 @@ CPU在此为秒，不是百分比。经20个独立生产候选审计后，明确
 
 Smux UDP接收socket溢出和RAW/TLS消费背压已观察，但尚未指定Core、Mihomo或Xray的唯一逻辑根因。旧Mihomo worker满队列的准备丢包与后续正式UDP容量问题是不同证据，不可混为已证同一原因。
 
-读取合并、时钟和编码写帧候选均未形成全部保护通过的采用方案，生产保留6c3e3c2原路径。部分H3 UDP目标曾严格通过；原RAW控制和H3 UDP普通窗口经各自多轮后相对10%阶段有效通过，原严格FAIL保留，详见[最终压力结论](../conclusions/full-pressure-final.md)。
-
-## 其他历史错误
-
-- V2Ray-core稳定版5.53.0的传统H2曾出现服务端panic：Header called after Handler finished、退出2、OOM为零；后续相同版本窗口健康只表示未复现，触发交错仍UNKNOWN。
-- 旧Xray 26.3.27曾在进程仍存活、OOM为零时缺少H3 UDP绑定端口，缺少直接关闭原因；连接idle或会话回收不能单独解释listener消失。后续新版本健康不等于已证明该旧故障修复。
-- SS2022 EIH、WebSocket早数据及旧准备权限／清理ERROR的后续通过，不能证明原失败唯一原因。准备期规则源文件EACCES发生在Core启动前，与可执行权限或协议握手失败分别判断。
 
 ## 暂缓与未验
 
-- [高并发体验基线](experience-baseline.md)：512连接时RSS45.50MiB仍超43MiB，优化暂缓；日常和少量慢连接通过不代签极限场景。
+- [高并发体验基线](experience-baseline.md)：512连接时RSS45.50MiB超过当时43MiB门槛；当前Linux内存仅参考，历史FAIL仍保留且优化暂缓；日常和少量慢连接通过不代签极限场景，历史原判定保留。
 - 当前源码完整FFI ABI／TUN、Apple／Android／Windows平台和真机，以及iOS/tvOS整个扩展physical footprint未新增验收；旧有限结果见[主线范围](mainline-validation.md)。
 - 2Gbps、高并发与少量慢连接进一步压力、Linux system／DHCP系统集成继续暂缓；1Gbps协议互通与压力通过不代签这些范围。
 - DNS的真实5秒总预算到期、prefer-H3竞速与静态C消费者未由有限DoQ／forced-H3窗口签署。H3 MITM不支持，保留H1/H2 MITM和H3透明旁路。
-
-正式测试、协议fixture、资源断言和受控socket门禁继续保留。删除过程材料不改变这些功能入口，不补造数据或自动放宽验收资格。

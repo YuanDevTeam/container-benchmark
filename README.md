@@ -1,16 +1,16 @@
 # Vole / Mihomo TUN benchmark
 
 本工程负责隔离环境中的协议互通、Vole 原生 TUN 压力及 Vole／Mihomo 同负载比较。
-结果见 [Benchmark 总览](docs/benchmark.md)与[整体 1Gbps 最终结论](conclusions/full-pressure-final.md)。
+历史基线与适用范围见 [Benchmark 总览](docs/benchmark.md)。
 互通、有限体验、性能、编译、原生 ABI 与设备验收分别解释；旧结果保留原源码、对端、输入和判定。
 
 ## 授权与隔离
 
-实验仅使用自有容器、隔离网络命名空间、合成流量和测试身份；通过 NAT 连接，不发布宿主端口。
-宿主只承担编排、编译与离线分析，保留宿主 VPN、路由、DNS、防火墙及无关资源。
+实验使用自有容器、隔离网络命名空间、合成流量和测试身份。容器通过 NAT 连接，可按测试需要发布宿主端口。
+macOS 综合压力用 socketpair 模拟包 I/O，原站和协议端在自有容器中运行，DNS 经 Mac carrier 到容器。所有路径均保留宿主 VPN、路由、DNS、防火墙及无关资源。
 正式依赖可作为输入下载，公共服务不作为负载目标。
-所有网络业务，包括 CLI、Invoke／FFI、DNS、生命周期、互通和性能检查，都经过真实 raw-IP TUN，
-并核验实际 TUN 流量及正常 Stop／join／清理；Controller 只作管理入口。离线检查和编译不要求 TUN。
+所有网络验收业务，包括 CLI、Invoke／FFI、DNS、生命周期、互通和性能检查，都经过真实 raw-IP TUN，
+并核验实际 TUN 流量及正常 Stop／join／清理；Controller 只作管理入口。socketpair 诊断单独记录，不代替真实 TUN、真机吞吐或内存验收。离线检查和编译不要求 TUN。
 被测客户端不配置 HTTP／SOCKS 入站；官方对端的对应 listener 只用于验证出站协议。
 
 抓包、会话密钥和解密仅限明确需要的自有合成测试，按最小必要范围收集；不写入最终结论，随临时资源清理。
@@ -19,11 +19,12 @@
 
 ## 固定环境与输入
 
-- Apple Silicon macOS 使用 Apple 官方 `container`；Windows 使用 `wslc`，guest 架构匹配宿主原生 AMD64／ARM64。全部自有 guest 使用官方 `docker.io/library/ubuntu:26.04`，每会话冻结对应架构的 digest 并读回 `VERSION_ID`。Windows 前提与能力边界见 [Windows / wslc](docs/windows-wslc.md)。
+- 容器在 Apple Silicon macOS 使用 `container`，在 Windows 使用 `wslc`，guest 架构匹配宿主。编译和测试复用最新 Ubuntu LTS 的依赖镜像，预装公共依赖及稳定 Rust、Go。每天核对来源，依赖变动时重建，每会话冻结镜像和工具链。详见 [依赖镜像](docs/prepared-image.md) 和 [Windows / wslc](docs/windows-wslc.md)。
 - 专用编译容器为 5 CPU／16 GiB；客户端、协议服务端、原站与负载容器为 5 CPU／4 GiB。builder 停止并清理后才启动负载。
-- guest 在启动 Core／对端前固定并核验 `hostname=benchmark`；Apple ARM64 环境的默认内核为 `7.3.0-vole-kata430`，Windows 记录实际 WSL session 内核。MPTCP 与匹配签名的 TCP Brutal 模块按所选场景独立验收，不能跨内核或平台复用通过证明。
+- 全部自有容器使用最新维护中的 **7.3 stable** 自编译内核。启动后核验内核配置、MPTCP enabled=1、可信的匹配 TCP Brutal 模块及默认 BBR，实际 MPTCP 协商和 Brutal socket 按场景核验。 [内核环境](docs/kernel-environment.md)
 - 当前默认 1Gbps，每窗 60 秒，分别运行 TCP、UDP、mixed。2Gbps 和显式 3Gbps 专项单独选择，不加入当前默认矩阵。
 - 默认 64 条业务流，每个 UDP 源 socket 轮换 64 个目的端口；单目标例外以窗口输入为准。1Gbps 是全部流、上下行与两条 CN 分支的合计应用载荷供给。
+- 多端口／端口跳跃协议组合的完整候选端口集合展开、去重后最多50个，在监听或端口发布前核对；范围及实施状态见[端口预算](docs/port-budget.md)。
 - 额外叠加 1000 QPS 唯一名称 DNS；命中／未命中 CN 分支各承担一半业务。DNS 不计入业务带宽，保持 DIRECT。
 - 两客户端启用回环 Controller，负载前请求 `/connections`，测量期间保持空闲。同容器实例使用不同回环端口。
 - 固定同一官方 MetaCubeX/meta-rules-dat revision 的完整非 lite `geosite.dat`／`geoip.dat`，加载完整 `geosite:cn`／`geoip:cn`，保留正反见证。额外 MRS／MMDB／DB／MetaDB／ASN 也来自同一官方仓库并记录身份；仅在用户明确要求时改变分类。
@@ -74,7 +75,7 @@ uv run --locked container-benchmark experience \
 `--geoip-format metadb`选择同一官方快照的完整 MetaDB，不与 Mihomo 客户端对照同时使用；默认 DAT。
 额外 domain MRS 使用 `--domain-rule-set /path/to/cn.mrs --domain-rule-witness www.qq.com`，
 同时验证 GeoSite／MRS 正见证和真实 RULE-SET 命中，防止缺少域名元数据绕过。
-`--peer-kernel /absolute/path/to/Image`只选择协议服务端 guest 内核，并记录文件与实际内核身份。
+`--peer-kernel /absolute/path/to/Image`显式输入仍须与本次冻结的最新 stable 内核身份一致，不能绕过全部容器的共享内核门禁。
 
 ### 精确窗口与恢复
 
@@ -130,9 +131,11 @@ uv run --locked python -m container_benchmark.interop.tcp_options \
 ```
 
 压力代表为 `vless-tcp-plain-mptcp`与`vless-tcp-tls-h2mux-brutal`，通过主 `stress`入口显式选择。
-MPTCP 使用独立 listener 的 `inbound-mptcp`；Brutal 仅在使用它的自有 guest 核验／加载匹配模块，
-不改变系统默认拥塞算法，关闭 socket 后只卸载本夹具加载的模块。
+MPTCP 使用独立 listener 的 `inbound-mptcp`；Brutal 模块在全部自有 guest 的环境前检中加载，
+业务夹具借用该能力并单独核验实际 socket，不改变系统默认拥塞算法；模块随自有 VM 清理。
 这些夹具不声明 MPTCP 与 Brutal 叠加支持；有 protect／接口／源地址约束时必须保留既有出口策略及安全 fallback。
+
+`brutal-h2mux-local-absent` 要求本地缺少模块，与全部容器预先加载 Brutal 的环境合同冲突，现标记为 `NOT_APPLICABLE`，`--list` 显示原因。只选择此项时直接保存不适用结果，不准备依赖或创建容器／网络资源；与适用项混选且其余项通过时，总结果为 `PARTIAL`。旧的模块缺失测试保留原环境和判定，不改签为新基线的通过证明。
 
 ### HTTP、MITM 与原生 ABI
 
@@ -158,7 +161,8 @@ CA 使用独立 `0600`材料文件，不安装系统信任，私钥随临时资�
 
 `http_pressure`默认 streaming 九窗，`--profile h12`为十窗；支持离线`--list`及模式／速率／流量筛选。
 纯 UDP 只验配置隔离，不证明 HTTP／MITM 命中；实际改写、原样回放、业务字节、内容和独立原站封账分别记录。
-主动 rewrite／MITM 没有等价 Mihomo 处理器，参考验收不适用。
+该旧 `http_pressure` 范围的主动 rewrite／MITM 没有等价 Mihomo 处理器，等价处理参考验收不适用。
+独立版本的 [Mac 全负载压力](docs/mac-full-pressure.md) 使用公共 Rust 发生器，分别执行 `js`／`mixed` 的 1 Gbps 综合窗口；其默认性能目标为 800 Mbps／适用 UDP 丢包≤1%，Mac Core worker `phys_footprint`≤45 MiB。该Mac JS范围在精确窗口完成严格优化阶段后使用40%比例差距：吞吐≥min(800,0.6×Mihomo实测)、UDP丢包≤max(1%,min(100%,1.4×Mihomo实测丢包率))；阶段资格及其他门禁保持。显式追加的 Linux Mihomo real-TUN 参考使用 `mihomo-raw-delivery-v1`，只按实际发送／接收载荷和交付比例测量容量，不校验内容或完整性；部分交付与零接收照实计量。Mihomo 使用原文协议处理，不执行 MITM／JS，平台、协议栈和调度差异单列；旧 Linux 950 Mbps、10%阶段及历史判定保持原范围。
 
 ECH／GREASE／H3 透明旁路使用 `interop.http_transparency`，除 source／binary／output 外，
 传 `--boring-out /path/to/boring-sys-build/out`和`--boring-include /path/to/boring-sys-build/out/boringssl/include`。
@@ -168,39 +172,42 @@ ECH／GREASE／H3 透明旁路使用 `interop.http_transparency`，除 source／
 
 - **吞吐**：60 秒活动窗口内实际接收载荷，包含错误内容及错误返回前的部分 I/O；`goodput_mbps`沿用字段名，表示 raw 接收吞吐。实际发送、排空接收和目标配额另列。
 - **CPU**：进程 CPU 秒／采样墙时×100%，100%为一个逻辑核。覆盖业务准备、运行、排空，排除编译、下载、Core初始启动、首次连通和最终Stop；墙时不必等于60秒。
-- **RSS**：核验 PID／可执行文件身份后，20ms采样所得生命周期 VmHWM／VmRSS 最大值，覆盖启动至Stop／reap。快速退出的瞬时峰值可能不可见；`shutdown_observed`单列。`wait4`只作独立诊断，不作内存排名。
-- **UDP交付丢包**：实际发送与固定收尾内唯一有效接收之差除以实际发送。上下行分列，合计按实际包数加权；坏包与重复包不抵消缺口，发送不足另记。
-- **TCP完整性**：每流实际已发送前缀须在原期限内完整交付，内容、来源、摘要及结束状态均正确。普通窗口每流起点加63秒截止，活动期结束不再开始新记录；配额不足与实际字节缺口分开，不延长期限消除FAIL。
-- **窗口与DNS**：各分支均达到计划活动时长才算完整。DNS skipped／timeout／SERVFAIL／REFUSED／迟到分列，错误回答不计成功；`driver_complete`或旧`load_reached`不单独代替这些证据。
+- **Apple平台内存**：macOS模拟与iOS／tvOS新窗口正式考查 `phys_footprint`，上限45MiB。Mac读取独立Core worker的Mach内核lifetime峰，覆盖初始化、业务、排空、Stop／destroy及观察器join后的最终读取；其后的回包序列化与退出尾段不冒称已观测。真机读取整个NE的footprint，两者owner范围仍不同。缺少有效footprint保持不可用，不回退RSS。
+- **参考内存／RSS诊断**：Linux核验PID／可执行文件身份后，20ms采样生命周期VmHWM／VmRSS最大值，覆盖启动至Stop／reap；快速退出的瞬时峰值可能不可见，`shutdown_observed`单列，`wait4`作为独立诊断。Mac保留精确worker的Darwin `wait4.ru_maxrss`，Apple真机保留NE resident，均不替代Apple正式footprint门禁。
+- **Vole UDP交付丢包**：实际发送与固定收尾内唯一有效接收之差除以实际发送。上下行分列，合计按实际包数加权；坏包与重复包不抵消缺口，发送不足另记。Mihomo新raw参考使用实际接收包数及比例，详见其独立合同。
+- **Vole TCP完整性**：每流实际已发送前缀须在原期限内完整交付，内容、来源、摘要及结束状态均正确。普通窗口每流起点加63秒截止，活动期结束不再开始新记录；配额不足与实际字节缺口分开，不延长期限消除FAIL。
+- **窗口与DNS**：各分支均达到计划活动时长才算完整。DNS skipped／timeout／SERVFAIL／REFUSED／迟到分列，错误回答不计成功；`driver_complete`或旧`load_reached`不单独代替这些证据。Vole要求严格完成。Mihomo 对照保留窗口与 owner 证据，DNS 计划、实际发送、未发送及回答情况仅作诊断。
 
-双方同输入；多轮吞吐／CPU取中位数、RSS取生命周期最大值、UDP按实际发送包数加权。
+双方同输入；多轮吞吐／CPU取中位数，内存按明确的平台指标保留各自owner的峰值，UDP按实际发送包数加权。
 TCP重传、内核UDP计数、负载侧CPU及停止后队列最大值均为独立诊断，不代替业务交付或Core指标。
 不可用值写N/A，不补零。可选`BENCHMARK_MEMORY_DIAGNOSTICS=1`或`NativeProcess(..., memory_diagnostics=True)`
 只启用有界外部快照，不作为正式峰值或压力PASS。
-Linux RSS不代签iOS／tvOS扩展physical footprint，编译与Linux业务不代签平台／真机。
+Linux、Android、Windows的客户端内存仅作参考：保留各平台真实指标，取消RSS预算与仅内存不可用的验收阻断，不改名为footprint或代签Apple验收。编译与Linux业务不代签平台／真机。
 
 ## 优化与验收策略
 
-| 范围 | 吞吐下限 | UDP交付丢包上限 | Vole RSS |
+| 范围 | 吞吐下限 | UDP交付丢包上限 | Apple内存上限；其他平台参考 |
 | --- | --- | --- | --- |
-| 1Gbps默认性能参考 | 950Mbps | 1% | ≤43MiB |
-| 同输入Mihomo初期参考 | min(950, Mihomo实测)Mbps | max(1%, Mihomo实测) | ≤43MiB |
-| 多轮结束后的精确窗口 | min(950, 0.9×Mihomo实测)Mbps | max(1%, min(100%, 1.1×Mihomo实测)) | ≤43MiB |
+| 1Gbps默认性能参考 | 950Mbps | 1% | ≤45MiB |
+| 同输入Mihomo初期参考 | min(950, Mihomo实测)Mbps | max(1%, Mihomo实测) | ≤45MiB |
+| 多轮结束后的精确窗口 | min(950, 0.9×Mihomo实测)Mbps | max(1%, min(100%, 1.1×Mihomo实测)) | ≤45MiB |
 | 后续2Gbps／显式3Gbps过载 | 记录，不设性能门槛 | 记录，不设性能门槛 | ≤45MiB |
 
-CPU独立记录。性能、完整性、内存、测量、DNS、实际TUN、正常Stop／join和清理分别判断；
+Apple平台内存上限统一为 **≤45MiB（47,185,920字节，含等值）**，不按带宽、性能参考阶段或体验场景分档。共享 `memory_policy.py` 按实际客户端OS选择政策：Mac模拟考查独立Core worker的 `phys_footprint`，iOS／tvOS考查整个NE；RSS只作附加诊断。Linux、Android、Windows使用 `informational`、`limitBytes=null`，内存大小或仅内存读数缺失不影响业务验收，报告显示“参考／不设门槛”。OOM、异常退出、身份错误和未正常Stop／join仍是失败。缺少Apple正式footprint证据不能用RSS或旧诊断采样补齐。历史测量、门槛和PASS／FAIL不追改；政策变动不代表已重跑。统一接口和平台能力边界见[客户端内存政策](docs/client-memory.md)。
+
+CPU独立记录。Vole 的性能、完整性、适用内存门禁、测量、DNS、实际TUN、正常Stop／join和清理分别判断；
 综合通过必须满足全部适用门禁。TCP不套用UDP丢包率，完整性失败不改写性能状态。
 过载允许有界丢包／断连保护内存，仍须完成窗口并验证已接收内容与来源，保留截断、未完成量和原错误状态。
 
-性能未达标时补测同一协议、服务端、规则、负载、队列和环境的Mihomo；兼容／完整性错误与指标可测量性分开，
-实际吞吐、CPU、RSS和丢包仍记录。没有可测匹配对照时使用默认参考，不能用其他客户端或旧窗口代替。
+性能未达标时补测同一协议、服务端、规则、负载、队列和环境的 Mihomo。容量对照只比较实际接收吞吐与 UDP 丢包率。丢包率以实际发包为分母，未发送单列。内容、交付完整性及发送配额完成情况不作门禁，CPU、RSS 和传输错误作为参考。Mac 全负载的实际计数边界见[参考合同](docs/mac-full-pressure.md#linux-mihomo-协议容量参考)。
+缺少有效身份、窗口、计数或生命周期证据时，匹配参考仍不可用，使用默认参考；不能用其他客户端或旧窗口代替。
 客户端固定为Vole与Mihomo，服务端按[字段顺位和明确例外](docs/server-selection.md)选择，失败本身不构成换端理由。
 
 优化先对照本地Mihomo、clash-rs和官方实现，区分Core／对端／benchmark，再按实测瓶颈采样和修改。
 允许渐进改善与合理指标取舍，不设单次改善幅度下限；不能把实际业务减少当作收益，受影响窗口仍须满足门禁。
 每个精确窗口最多20个独立生产候选；原版、重复、纯观测、仅编译／内存检查不计新轮。
 多轮后可明确原因提前结束严格阶段；相对10%资格只用于已登记的服务端、流量、速率、TLS、地址族、队列与负载，
-按相对比例计算，不加百分点，不放宽内存、完整性、DNS或生命周期。
+按相对比例计算，不加百分点，不放宽适用内存门禁、完整性、DNS或生命周期。
 
 运行账本`conclusions/pressure-passes.json`保存历史通过证明，`conclusions/optimization-rounds.json`保存资格和证据指纹，
 均属于正式运行输入，不随过程材料删除；历史证据标识不代表过程文件仍保留。
@@ -226,3 +233,7 @@ uv run --locked ruff format --check .
 按任务保留必要的最终产物；保留已验证共享依赖、源码及无关资源。
 每个TUN实例只逐条删除带本实例唯一comment的IPv4／IPv6 NAT规则，保留既有及其他实例规则；重复关闭不得重复删除。
 设置与业务异常保留首因；清理或结论持久化失败时保留自有scratch及未回收记录，供原owner恢复。
+
+## Mac 模拟
+
+`mac_full_campaign` 以 socketpair 模拟 TUN，按协议运行 1 Gbps 的纯 JS 与 JS 加内置规则窗口，支持断点、回归和 Linux Mihomo 参考。 [Mac 全负载压力](docs/mac-full-pressure.md)

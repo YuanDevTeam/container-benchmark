@@ -16,7 +16,7 @@
 
 独立生产候选最多优化 20 轮，可在多轮后说明原因并明确提前结束。满足精确范围及结束依据后，吞吐目标为 `min(950 Mbps, 0.9×Mihomo 吞吐)`，UDP 丢包上限为 `max(1%, min(100%, 1.1×Mihomo 丢包))`；相对 10% 不是 10 个百分点。达到适用目标即停止该项性能优化，不新增单次改善幅度下限，以实际完成量、运行波动及综合收益评价渐进改进。
 
-综合通过仍要求完整性、内存、完整真实 TUN 窗口、有效观测、DNS、正常 Stop／join 和清理。RSS 门槛为 1 Gbps≤43 MiB、后续 2／3 Gbps≤45 MiB；2／3 Gbps 当前暂缓。性能通过而 TCP 仍缺字节时，交付 FAIL 保留，只继续处理交付问题。
+综合通过仍要求完整性、适用的内存门禁、完整真实 TUN 窗口、有效观测、DNS、正常 Stop／join 和清理。Apple的 `phys_footprint` 上限为≤45 MiB（含等值）；Linux／Android／Windows内存仅作参考，不设RSS预算门禁，缺失读数独立记为不可用。真实OOM、异常退出和join失败不会被参考政策豁免；2／3 Gbps 当前暂缓。性能通过而 TCP 仍缺字节时，交付 FAIL 保留，只继续处理交付问题。
 
 旧 `load_reached=false` 可能仅来自原 99% 复合门槛，不能把 950–990 Mbps 的完整实测窗口判为无效。原字段和历史 FAIL／ERROR 不改写，以完整活动窗口、实际计数和独立测量证据判读；不设置绝对容量轴。
 
@@ -24,4 +24,4 @@
 
 先对照 Core、对端和 benchmark 的实际发送、接收、关闭及截止时序。改变速率、连接数或期限的诊断必须独立记录输入，不能以放宽期限覆盖原 FAIL，也不能代签正式压力。
 
-已确认的 Mieru [跨逻辑会话 NAT 错回](../conclusions/mieru-tcp-nat-alias.md)与[正常 Close／在途 DATA 边界](../conclusions/mieru-sdk-close-current.md)，以及仍未知的期限前停滞保持独立。后续通过不证明所有历史原因已修复；当前结果与已知边界见[最终覆盖结论](../conclusions/full-pressure-final.md)和[已知问题](known-issues.md)。Linux CLI 的 RSS、交付和压力结果不代表平台或真机验收。
+Mieru 的 NAT 错回、正常 Close 时仍有在途 DATA 和期限前停滞分别记录。选端依据和已知边界见 [服务端选择](server-selection.md) 与 [已知问题](known-issues.md)。

@@ -144,7 +144,8 @@ type flowResult struct {
 	UDPHello           *originUDPHelloProgress `json:"udp_hello,omitempty"`
 	UDPPreparation     *udpPrepareStats        `json:"udp_preparation,omitempty"`
 
-	ExpectedBytes int64 `json:"expected_bytes,omitempty"`
+	ExpectedBytes      int64 `json:"expected_bytes,omitempty"`
+	ExpectedUDPPackets int64 `json:"expected_udp_packets,omitempty"`
 }
 
 // Failure-only progress; the origin validates target hellos sequentially.
@@ -2427,6 +2428,9 @@ func clientFlowWithIO(peer string, r request, ready *sync.WaitGroup, start <-cha
 func checkedFlow(direction string, r request, sent, received result, sourceVerified bool) flowResult {
 	outcome := flowResult{Transport: r.Transport, Direction: direction, Sent: sent, Received: received, SourceVerified: sourceVerified, TLSVersion: r.TLSVersion}
 	expected := totalBytes(r)
+	if r.Transport == "udp" && !r.Probe && r.Experience == "" {
+		outcome.ExpectedUDPPackets = count(r)
+	}
 	if r.Transport == "tcp" && !r.Probe && r.Experience == "" {
 		outcome.ExpectedBytes = expected // Desired capacity, separate from actual delivery.
 		if sent.TCPActiveWindowEnd && received.TCPRecordEOF && sent.Elapsed >= float64(r.Seconds) &&

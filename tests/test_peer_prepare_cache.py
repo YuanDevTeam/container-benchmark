@@ -26,7 +26,14 @@ class PeerPrepareCacheTests(unittest.TestCase):
             log.write_text("synthetic guest version")
 
         guest = SimpleNamespace(
-            ipv4="192.0.2.2", ipv6="2001:db8::2", record={}, execute=execute
+            ipv4="192.0.2.2",
+            ipv6="2001:db8::2",
+            image="test-peer-image",
+            record={
+                "name": "test-peer",
+                "preparedImage": {"fingerprint": "11" * 32},
+            },
+            execute=execute,
         )
         owner = PeerLab(root, guest, "00" * 32, SimpleNamespace(ipv4="192.0.2.3"))
         owner.identities["xray"] = {
@@ -96,6 +103,15 @@ class PeerPrepareCacheTests(unittest.TestCase):
                     ],
                 ) as generate,
                 patch.object(PeerLab, "start") as start,
+                patch(
+                    "container_benchmark.prepared_image._inspect",
+                    return_value="sha256:" + "22" * 32,
+                ),
+                patch.object(PeerLab, "identity_snapshot", return_value={}),
+                patch(
+                    "container_benchmark.pressure_peer_health.verify_peer_identity",
+                    return_value={"verified": True},
+                ),
                 patch.object(
                     PeerLab, "stop", return_value={"status": "STOPPED", "joined": True}
                 ),
@@ -108,6 +124,17 @@ class PeerPrepareCacheTests(unittest.TestCase):
             copy_xray.assert_not_called()
             self.assertIs(owner.identities["xray"], prepared)
             self.assertEqual(start.call_count, 2)
+            requests = [
+                start_call.kwargs["identity_request"]
+                for start_call in start.call_args_list
+            ]
+            self.assertEqual(
+                [request["profileID"] for request in requests],
+                [profile.name for profile in self.profiles()],
+            )
+            self.assertEqual(
+                requests[0]["serverArtifactSHA256"], requests[1]["serverArtifactSHA256"]
+            )
 
 
 if __name__ == "__main__":

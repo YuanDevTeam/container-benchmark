@@ -105,6 +105,7 @@ def report(case, peak=30 * 1024**2):
             "status": "PASS",
             "cleanup": True,
             "peak_bytes": peak,
+            "metric": "rss",
             "samples": 10,
             "sigint_requested": True,
             "exit_code": 0,
@@ -300,21 +301,46 @@ class ExperienceTests(unittest.TestCase):
         self.assertFalse(case["dns_completion_met"])
         self.assertFalse(case["experience_met"])
 
-    def test_acceptance_uses_final_peak_and_graceful_stop(self):
+    def test_acceptance_records_optional_rss_and_requires_graceful_stop(self):
         rows = daily_rows()
         case = experience.summarize(rows, scenario="daily", dns=dns_report())
         case["direction_packets"] = workload.directional_packets(rows)
-        result = report(case, 43 * 1024**2 + 1)
-        experience.annotate(result, "daily")
-        self.assertFalse(case["experience_met"])
+        for peak, passed in (
+            (43 * 1024**2 + 1, True),
+            (45 * 1024**2, True),
+            (45 * 1024**2 + 1, True),
+            (512 * 1024**2, True),
+            (None, True),
+            (0, True),
+        ):
+            with self.subTest(peak=peak):
+                result = report(case, peak)
+                experience.annotate(result, "daily")
+                self.assertEqual(case["peak_bytes"], peak)
+                self.assertIsNone(case["memory_limit_bytes"])
+                self.assertIsNone(case["memory_limit_met"])
+                self.assertEqual(case["memory_assessment"]["status"], "NOT_APPLICABLE")
+                self.assertEqual(case["experience_met"], passed)
         result["measurement"].update(
-            peak_bytes=43 * 1024**2, forced_signals=["SIGKILL"]
+            peak_bytes=45 * 1024**2, forced_signals=["SIGKILL"]
         )
         experience.annotate(result, "daily")
         self.assertFalse(case["experience_met"])
         result["measurement"]["forced_signals"] = []
         experience.annotate(result, "daily")
         self.assertTrue(case["experience_met"])
+
+    def test_critical_observer_errors_remain_failures_without_memory_budget(self):
+        rows = daily_rows()
+        case = experience.summarize(rows, scenario="daily", dns=dns_report())
+        case["direction_packets"] = workload.directional_packets(rows)
+        result = report(case, peak=None)
+        result["measurement"]["memory_sampling_errors"] = ["memory-only"]
+        experience.annotate(result, "daily")
+        self.assertTrue(case["experience_met"])
+        result["measurement"]["sampling_errors"] = ["process-identity-changed"]
+        experience.annotate(result, "daily")
+        self.assertFalse(case["experience_met"])
 
 
 if __name__ == "__main__":

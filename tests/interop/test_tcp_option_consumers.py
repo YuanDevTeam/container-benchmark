@@ -86,9 +86,15 @@ class TCPOptionConsumersTests(unittest.TestCase):
             contextlib.redirect_stdout(io.StringIO()) as output,
         ):
             consumers.main(["--list"])
+        lines = output.getvalue().splitlines()
         self.assertEqual(
-            output.getvalue().splitlines(), [row["id"] for row in consumers.cases()]
+            [line.split("\t", 1)[0] for line in lines],
+            [row["id"] for row in consumers.cases()],
         )
+        unavailable = [line for line in lines if "NOT_APPLICABLE" in line]
+        self.assertEqual(len(unavailable), 1)
+        self.assertTrue(unavailable[0].startswith("brutal-h2mux-local-absent\t"))
+        self.assertIn("baseline keeps TCP Brutal loaded", unavailable[0])
         self.assertEqual(len(consumers.cases()), 12)
         self.assertEqual(
             {row["mux"] for row in consumers.cases() if row.get("local_module")},

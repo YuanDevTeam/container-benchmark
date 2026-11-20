@@ -67,8 +67,8 @@ def _image_digest(ref):
     return digest
 
 
-def shared_image(ref=IMAGE, log=None):
-    if ownership.IMAGE.fullmatch(ref) is None or "@" in ref:
+def official_image(ref=IMAGE, log=None):
+    if ownership.OFFICIAL_IMAGE.fullmatch(ref) is None or "@" in ref:
         raise ValueError("shared image must be an official Ubuntu floating tag")
 
     def prepare(_directory):
@@ -98,6 +98,18 @@ def shared_image(ref=IMAGE, log=None):
     )
     ownership.share_image(ref)
     ownership.share_image(ref.rsplit(":", 1)[0] + "@" + identity["digest"])
+    if log is not None:
+        log.write_text(json.dumps(identity, indent=2) + "\n")
+    return identity
+
+
+def shared_image(ref=IMAGE, log=None):
+    """The shared workload input is the prepared dependency image."""
+    if ref != IMAGE:
+        raise ValueError("prepared images require the current official Ubuntu LTS")
+    from .prepared_image import ensure_prepared_image
+
+    _, identity = ensure_prepared_image()
     if log is not None:
         log.write_text(json.dumps(identity, indent=2) + "\n")
     return identity

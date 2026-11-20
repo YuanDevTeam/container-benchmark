@@ -12,7 +12,7 @@ from pathlib import Path
 
 from .download_cache import daily
 from .guest_architecture import architecture
-from .inputs import materialize_readonly_input, sha256
+from .inputs import sha256
 from .linux_builder import LinuxGuest, install_tools
 
 
@@ -79,22 +79,11 @@ def prepare(
     go = {key: toolchain[key] for key in ("version", "archive_sha256")}
     if sha256(archive) != go["archive_sha256"]:
         raise ValueError("Go peer toolchain archive identity differs")
-    tools = next(
-        (
-            path / "builder-tools"
-            for path in (root, root.parent)
-            if (path / "builder-tools").is_dir()
-        ),
-        None,
-    )
-    if tools is None:
-        raise ValueError("Go peer build requires prepared builder packages")
     inputs = {
         "name": name,
         "image": image,
         "sources": source_files(source),
         "go_toolchain": go,
-        "builder_packages": source_files(tools),
         "package": package,
         "test": test,
         "flags": (["-mod=readonly"] if (source / "go.mod").is_file() else [])
@@ -108,15 +97,6 @@ def prepare(
         work = root / (name + "-builder-" + uuid.uuid4().hex[:8])
         work.mkdir()
         (work / "artifacts").mkdir()
-        shutil.copytree(
-            tools, work / "builder-tools", copy_function=materialize_readonly_input
-        )
-        materialize_readonly_input(archive, work / "go.tar.gz")
-        if (
-            source_files(work / "builder-tools") != inputs["builder_packages"]
-            or sha256(work / "go.tar.gz") != go["archive_sha256"]
-        ):
-            raise RuntimeError("Go peer compiler inputs changed during preparation")
         builder = LinuxGuest(
             work,
             image,
@@ -130,15 +110,13 @@ def prepare(
             session.guests.append(builder.peer)
         with builder:
             install_tools(builder, toolchain=False)
-            builder.execute(
-                ["tar", "-xzf", "/run/benchmark/go.tar.gz", "-C", "/run/benchmark"],
-                work / "go-unpack.log",
-                timeout=60,
-            )
+            installed = builder.record["preparedImage"]["go"]
+            if any(installed.get(key) != value for key, value in go.items()):
+                raise ValueError(
+                    "prepared image Go identity differs; prepare fresh inputs"
+                )
             version = work / "go-version.log"
-            builder.execute(
-                ["/run/benchmark/go/bin/go", "version"], version, timeout=15
-            )
+            builder.execute(["go", "version"], version, timeout=15)
             compiler = version.read_text().strip()
             if compiler != "go version " + go["version"] + " linux/" + architecture():
                 raise RuntimeError("Go peer compiler version differs")
@@ -150,7 +128,7 @@ def prepare(
                     else "GO111MODULE=off "
                 )
                 + "GOCACHE=/run/benchmark/go-build GOMODCACHE=/cache "
-                "GOPATH=/run/benchmark/go-path /run/benchmark/go/bin/go "
+                "GOPATH=/run/benchmark/go-path go "
             )
             script = "cd /peer-source\n"
             module_flag = "-mod=readonly " if "-mod=readonly" in inputs["flags"] else ""
@@ -174,14 +152,11 @@ def prepare(
             raise RuntimeError("Go peer sources changed during build")
         shutil.copy2(binary, staging / name)
         for path in (
-            work / "go",
             work / "go-build",
             work / "go-path",
-            work / "builder-tools",
         ):
             if path.exists():
                 shutil.rmtree(path)
-        (work / "go.tar.gz").unlink()
         return {"binary_sha256": sha256(binary), "compiler_version": compiler}
 
     artifacts = root / "artifacts"

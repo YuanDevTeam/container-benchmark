@@ -47,13 +47,25 @@ def _observation(name, row, is_passed):
     else:
         status = "ERROR"
     peak = _number(case.get("peak_bytes"))
+    policy = case.get("memory_policy")
+    policy = policy if isinstance(policy, dict) else {}
+    assessment = case.get("memory_assessment")
+    assessment = assessment if isinstance(assessment, dict) else {}
+    metric = assessment.get("metric", "rss")
     return {
         **coordinates(row),
         "window": name,
         "status": status,
         "goodput_mbps": _number(case.get("goodput_mbps")),
         "cpu_percent": _number(case.get("cpu_percent")),
-        "peak_rss_mib": peak / 1024**2 if peak is not None else None,
+        "peak_memory_mib": peak / 1024**2 if peak is not None else None,
+        "peak_rss_mib": peak / 1024**2
+        if peak is not None and metric == "rss"
+        else None,
+        "memory_metric": metric,
+        "memory_policy": policy,
+        "memory_assessment": assessment,
+        "client_execution": row.get("client_execution"),
         "udp_loss_rate": _number(case.get("udp_loss_rate")),
         "integrity_status": pressure_integrity(case)["status"],
         "performance_status": performance_reference(
@@ -120,7 +132,8 @@ def write_checkpoint(root, report, groups, *, reason, is_passed):
         "base_pass": counts["BASE_PASS"],
         "reference_pass": counts["REFERENCE_PASS"],
         "pass_scope": (
-            "performance-reference plus integrity, memory and measurement gates"
+            "performance-reference plus integrity, applicable memory "
+            "and measurement gates"
         ),
         "assessment_counts": {
             axis: dict(Counter(row[axis] for row in rows))
@@ -161,9 +174,10 @@ def write_checkpoint(root, report, groups, *, reason, is_passed):
         "",
         "PASS requires the performance reference and independent gates. "
         "Read integrity, performance reference and memory independently; "
+        "informational memory has no budget gate. "
         "missing evidence is UNKNOWN, not a new pass.",
         "",
-        "| Profile | Traffic | Mbps | CPU % | RSS MiB | UDP loss % | Integrity | "
+        "| Profile | Traffic | Mbps | CPU % | Memory MiB | UDP loss % | Integrity | "
         "Performance reference | Basis | Memory | Result |",
         "| --- | --- | ---: | ---: | ---: | ---: | --- | --- | --- | --- | --- |",
     ]
@@ -177,7 +191,7 @@ def write_checkpoint(root, report, groups, *, reason, is_passed):
         values = [
             row["goodput_mbps"],
             row["cpu_percent"],
-            row["peak_rss_mib"],
+            row["peak_memory_mib"],
             loss * 100 if loss is not None else None,
         ]
         lines.append(
@@ -185,7 +199,15 @@ def write_checkpoint(root, report, groups, *, reason, is_passed):
             + " | ".join(display(value) for value in values)
             + f" | {row['integrity_status']} | {row['performance_status']}"
             + f" | {row['performance_basis'] or 'N/A'} | "
-            + {True: "PASS", False: "FAIL"}.get(row["memory_limit_met"], "UNKNOWN")
+            + (
+                "参考 / 不设门槛"
+                + ("（不可用）" if row["peak_memory_mib"] is None else "")
+                if row["memory_policy"].get("mode") == "informational"
+                and row["memory_policy"].get("requiredForAcceptance") is False
+                else {True: "PASS", False: "FAIL"}.get(
+                    row["memory_limit_met"], "UNKNOWN"
+                )
+            )
             + f" | {row['status']} |"
         )
     lines += ["", "```json", json.dumps(result, indent=2, allow_nan=False), "```", ""]

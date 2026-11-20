@@ -7,6 +7,9 @@
 # Local text evidence; publish only reviewed summaries in README.md.
 /conclusions/
 
+# Local physical-device demo.
+/apple/
+
 # Python environments, caches and coverage.
 .venv/
 __pycache__/

@@ -57,6 +57,8 @@ class Session:
         self.arguments = list(arguments)
         self.sources = {name: Path(path) for name, path in (sources or {}).items()}
         self.status, self.reason = "NOT COMPLETED", ""
+        self.report_title = "Cross-core comparison conclusion"
+        self.retain_work_reason = ""
         self.work = None
         self.previous_env = {}
 
@@ -108,7 +110,7 @@ class Session:
             temporary.write_text(
                 "\n\n".join(
                     [
-                        "# Cross-core comparison conclusion",
+                        "# " + self.report_title,
                         f"Time: {datetime.now(UTC).isoformat()}",
                         "Arguments: " + json.dumps(self.arguments, ensure_ascii=False),
                         f"Execution: {self.status}; {self.reason}",
@@ -143,6 +145,8 @@ class Session:
             errors.extend(ownership.cleanup(self.work))
         except Exception as failure:
             errors.append(f"resource cleanup: {type(failure).__name__}")
+        if self.retain_work_reason:
+            errors.append("scratch retained: " + self.retain_work_reason)
         # Persist before deleting the only raw evidence. A failed save leaves
         # owned scratch intact for recovery instead of silently losing results.
         try:

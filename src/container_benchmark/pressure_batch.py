@@ -10,6 +10,7 @@ from copy import deepcopy
 from dataclasses import replace
 
 from .inputs import materialize_input_directory, materialize_readonly_input, save
+from .port_budget import validate_profiles_ports
 from .pressure_peer_health import MAX_PROCESSES
 from .pressure_peers import PeerLab
 
@@ -26,18 +27,14 @@ def relocate(value, prefix):
     return value
 
 
-@contextlib.contextmanager
-def serving(owner, profiles):
-    """One process per mergeable server, plus private decoders and native peers."""
-    from .server_selection import profile_selection
-
-    for profile in profiles:
-        profile_selection(profile)
-    configurations, commands, nodes = {}, [], {}
-    identities, covers = {}, {}
+def prepare_profiles(profiles):
+    """Pure preflight of both supplied candidates and final batch assignments."""
+    profiles = tuple(profiles)
+    validate_profiles_ports(profiles)
+    prepared = []
     for index, original in enumerate(profiles):
         if original.backend == "direct":
-            nodes[original.name] = None
+            prepared.append(original)
             continue
         port = 26000 + index * 2
         case = deepcopy(original.case or {})
@@ -46,7 +43,26 @@ def serving(owner, profiles):
         case["pressure_instance"] = original.name
         if case["pressure_aux_base"] > 65531:
             raise ValueError("batch auxiliary port range exhausted")
-        profile = replace(original, case=case)
+        prepared.append(replace(original, case=case))
+    validate_profiles_ports(prepared)
+    return tuple(prepared)
+
+
+@contextlib.contextmanager
+def serving(owner, profiles):
+    """One process per mergeable server, plus private decoders and native peers."""
+    from .server_selection import profile_selection
+
+    profiles = prepare_profiles(profiles)
+    feature_ports = validate_profiles_ports(profiles)
+    for profile in profiles:
+        profile_selection(profile)
+    configurations, commands, nodes = {}, [], {}
+    identities, covers = {}, {}
+    for profile in profiles:
+        if profile.backend == "direct":
+            nodes[profile.name] = None
+            continue
         owner.guest.execute(
             ["ln", "-sfnT", "/run/benchmark/pressure-peers", "/work"],
             owner.root / "select.log",
@@ -206,7 +222,8 @@ def serving(owner, profiles):
             "node": node,
             "source": owner.guest.ipv4,
             "guest": owner.guest.guest,
-            "environment": environment.copy(),
+            "environment": environment
+            | {"feature_port_candidates": list(feature_ports[name])},
         }
         for name, node in nodes.items()
     }

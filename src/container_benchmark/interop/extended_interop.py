@@ -460,6 +460,7 @@ def _caddy(selected, root, pin, guest, origin_ips):
                     }
                 },
                 "http": {
+                    "grace_period": "1s",
                     "servers": {
                         "gateway": {
                             "listen": [f":{case['port']}" for case in selected],
@@ -499,7 +500,7 @@ def _caddy(selected, root, pin, guest, origin_ips):
                                 }
                             ],
                         }
-                    }
+                    },
                 },
             },
         },

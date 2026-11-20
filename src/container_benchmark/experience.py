@@ -9,6 +9,8 @@ import signal
 from collections import Counter
 from types import SimpleNamespace
 
+from .memory_policy import assess_memory, memory_gate_allows
+
 SCENARIOS = {
     "single-tcp": {
         "purpose": "single downstream TCP capacity baseline",
@@ -435,8 +437,12 @@ def summarize(traffic, *, scenario, dns):
 
 
 def annotate(result, scenario):
-    """Use the completed process lifecycle; never substitute a phase RSS peak."""
-    from .pressure_acceptance import annotate_pressure_case, pressure_targets
+    """Use completed business/lifecycle evidence; memory is informational."""
+    from .pressure_acceptance import (
+        annotate_pressure_case,
+        memory_observation,
+        pressure_targets,
+    )
 
     measurement = result.get("measurement", {})
     for case in result.get("cases", []):
@@ -447,6 +453,7 @@ def annotate(result, scenario):
         peak = measurement.get("peak_bytes")
         observed = (
             measurement.get("status") == "PASS"
+            and measurement.get("sampling_errors", []) == []
             and measurement.get("cleanup") is True
             and type(measurement.get("samples")) is int
             and measurement["samples"] > 0
@@ -454,11 +461,9 @@ def annotate(result, scenario):
             and type(measurement.get("exit_code")) is int
             and measurement["exit_code"] in (0, -signal.SIGINT)
             and measurement.get("forced_signals") == []
-            and type(peak) is int
-            and peak > 0
             and result.get("host_tun_preserved") is True
         )
-        memory = observed and peak <= 43 * 1024**2
+        memory = assess_memory("linux", memory_observation(measurement))
         direction = case.get("direction_packets", {})
         sent = sum(row.get("sent_packets", 0) for row in direction.values())
         lost = sum(row.get("loss_packets", 0) for row in direction.values())
@@ -493,8 +498,11 @@ def annotate(result, scenario):
         )
         case.update(
             peak_bytes=peak,
-            memory_limit_bytes=43 * 1024**2,
-            memory_limit_met=memory,
+            memory_limit_bytes=memory["limitBytes"],
+            memory_limit_met=memory["gateMet"],
+            memory_required=memory["requiredForAcceptance"],
+            memory_policy=memory["policy"],
+            memory_assessment=memory,
             udp_loss_rate=udp_rate,
             udp_loss_target_met=udp_met,
             throughput_target_mbps=None,
@@ -505,7 +513,9 @@ def annotate(result, scenario):
             else "experience",
             memory_screening_only=True,
             device_acceptance_met=None,
-            experience_met=bool(observed and memory and business and udp_met),
+            experience_met=bool(
+                observed and memory_gate_allows(memory) and business and udp_met
+            ),
         )
 
 

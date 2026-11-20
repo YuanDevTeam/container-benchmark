@@ -41,8 +41,12 @@ func TestTransferDescribesFirstCorruptSyntheticDatagramAndContinues(t *testing.T
 	if err != nil || !bytes.Contains(wire, []byte(`"first_bad_offset":1168`)) || bytes.Contains(wire, []byte(`"payload":`)) {
 		t.Fatal("failure details did not serialize independently of packet contents")
 	}
-	if checkedFlow("down", r, out, out, true).Error == "" {
+	flow := checkedFlow("down", r, out, out, true)
+	if flow.Error == "" {
 		t.Fatal("continued reception incorrectly accepted corrupted content")
+	}
+	if flow.ExpectedUDPPackets != 2 || flow.Received.Packets != 3 {
+		t.Fatal("planned datagrams replaced actual raw receive counters")
 	}
 }
 

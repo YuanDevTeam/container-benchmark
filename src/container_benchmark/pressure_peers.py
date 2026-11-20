@@ -25,6 +25,7 @@ from .inputs import (
 from .interop import mihomo_interop as reference
 from .linux_builder import LinuxGuest, install_tools
 from .peer_buffers import receive_buffer_profile
+from .port_budget import validate_profile_ports
 from .pressure_peer_health import MAX_PROCESSES, bounded_text, read_json
 from .protocol_peer import COVER_PORT, PORT, _reality_keys
 
@@ -152,7 +153,15 @@ class NativeGuest:
 
 class PeerLab:
     def __init__(
-        self, root, guest, pin, dns, *, origins=(), names=None, guest_root="/work"
+        self,
+        root,
+        guest,
+        pin,
+        dns,
+        *,
+        origins=(),
+        names=None,
+        guest_root="/work",
     ):
         self.root, self.guest, self.pin, self.dns = (
             root,
@@ -164,6 +173,76 @@ class PeerLab:
         self.guest_root = guest_root
         self.identities = {}
         self.active = False
+        self.identity_expected = None
+
+    def identity_snapshot(self, label, *, scope=None):
+        """One passive observation at an owned phase boundary, never a poller."""
+        if not re.fullmatch(r"[a-z0-9-]{1,64}", label):
+            raise ValueError("unsafe peer identity label")
+        output = self.root / "peer" / ("identity-" + label + ".json")
+        try:
+            self.guest.execute(
+                [
+                    "python3",
+                    "-B",
+                    "-m",
+                    MODULE,
+                    "--identity",
+                    self.guest_root,
+                    json.dumps(scope, sort_keys=True, separators=(",", ":")),
+                ],
+                output,
+                timeout=30,
+            )
+            result = read_json(output)
+            if not isinstance(result, dict):
+                raise ValueError("peer identity observation must be an object")
+            return result
+        except (OSError, ValueError, subprocess.SubprocessError) as error:
+            return {
+                "source": "owned-guest-procfs-v1",
+                "failureKind": type(error).__name__,
+            }
+
+    def _identity_request(self, commands, profile, frozen_artifacts, server_identity):
+        from .paths import BENCHMARK_ROOT
+        from .prepared_image import _inspect
+        from .pressure_peer_health import file_identity, identity_digest
+
+        actual = self.guest.guest
+        marker = actual.record.get("preparedImage", {})
+        fingerprint = marker.get("fingerprint")
+        if not re.fullmatch(r"[0-9a-f]{64}", str(fingerprint)):
+            raise ValueError("peer identity requires the verified prepared image")
+        guest_id = actual.record.get("name")
+        if not isinstance(guest_id, str) or not guest_id:
+            raise ValueError("peer identity requires an exact owned guest")
+        source_root = BENCHMARK_ROOT / "src/container_benchmark"
+        files = sorted(source_root.rglob("*.py"))
+        if not 1 <= len(files) <= 1024:
+            raise ValueError("peer launcher source inventory exceeds its bound")
+        source_files = [
+            {
+                "path": "/benchmark/src/container_benchmark/"
+                + path.relative_to(source_root).as_posix(),
+                "sha256": file_identity(path, limit=1024 * 1024)["sha256"],
+            }
+            for path in files
+        ]
+        return {
+            "schemaVersion": 1,
+            "guestID": guest_id,
+            "profileID": profile.name,
+            "commandManifestSHA256": identity_digest(commands),
+            "artifactSHA256": frozen_artifacts,
+            "serverArtifactSHA256": server_identity["binary_sha256"],
+            "sourceFiles": source_files,
+            "sourceManifestSHA256": identity_digest(source_files),
+            "preparedImageFingerprint": fingerprint,
+            "imageRef": actual.image,
+            "imageDigest": _inspect(actual.image),
+            "imageIdentityKind": "local-config" if os.name == "nt" else "oci-manifest",
+        }
 
     def health(self, label):
         if not re.fullmatch(r"[a-z0-9-]{1,64}", label):
@@ -411,6 +490,7 @@ class PeerLab:
     def serving(self, profile):
         from .server_selection import profile_selection
 
+        validate_profile_ports(profile)
         profile_selection(profile)
         if profile.backend == "direct":
             yield None
@@ -476,6 +556,7 @@ class PeerLab:
     def configure(self, profile):
         from .server_selection import profile_selection
 
+        validate_profile_ports(profile)
         profile_selection(profile)
         if (profile.case or {}).get("pressure_extension"):
             from .pressure_extensions import configure
@@ -605,12 +686,49 @@ class PeerLab:
         node["name"] = "edge"
         return node, commands
 
-    def start(self, commands):
+    def start(self, commands, *, identity_request=None):
         for path in self.root.glob("peer/*"):
             if path.is_file():
                 path.chmod(0o600)
         save(self.root / "peer-processes.json", commands)
         (self.root / "peer-processes.json").chmod(0o600)
+        if identity_request is not None:
+            from .pressure_peer_health import identity_digest
+
+            save(self.root / "peer/identity-request.json", identity_request)
+            (self.root / "peer/identity-request.json").chmod(0o600)
+            output = self.root / "peer/identity-prelaunch.json"
+            self.guest.execute(
+                ["python3", "-B", "-m", MODULE, "--freeze-identity", self.guest_root],
+                output,
+                timeout=60,
+            )
+            expected = read_json(output)
+            for key in (
+                "guestID",
+                "profileID",
+                "commandManifestSHA256",
+                "sourceManifestSHA256",
+                "imageDigest",
+                "preparedImageFingerprint",
+            ):
+                if expected.get(key) != identity_request[key]:
+                    raise ValueError("peer prelaunch identity response differs")
+            if (
+                identity_digest(expected.get("sourceFiles"))
+                != identity_request["sourceManifestSHA256"]
+            ):
+                raise ValueError("peer prelaunch launcher inventory differs")
+            for process in expected.get("processes", []):
+                if (
+                    process.get("executableProvenance") == "host-frozen-peer-artifact"
+                    and process.get("executableSHA256")
+                    not in identity_request["artifactSHA256"].values()
+                ):
+                    raise ValueError(
+                        "peer prelaunch executable was not a frozen artifact"
+                    )
+            self.identity_expected = expected
         try:
             self.guest.execute(
                 ["python3", "-m", MODULE, "--start", self.guest_root],
@@ -639,21 +757,62 @@ class PeerLab:
 
     @contextlib.contextmanager
     def _serve_profile(self, profile, identity):
+        from .pressure_peer_health import file_identity, verify_peer_identity
+
+        feature_ports = validate_profile_ports(profile)
+        # Freeze the already prepared/copied binaries before configure can touch
+        # an artifact. Never learn an expected binary from a running process.
+        artifacts = sorted((self.root / "artifacts").iterdir())
+        if len(artifacts) > 128:
+            raise ValueError("peer artifact inventory exceeds its bound")
+        frozen_artifacts = {
+            "/work/artifacts/" + path.name: file_identity(path)["sha256"]
+            for path in artifacts
+            if path.is_file()
+        }
+        if identity.get("binary_sha256") not in frozen_artifacts.values():
+            raise ValueError(
+                "selected server differs from its official/build artifact identity"
+            )
         node, commands = self.configure(profile)
-        self.start(commands)
-        environment = self.guest.guest.record | {"server": identity}
+        request = self._identity_request(commands, profile, frozen_artifacts, identity)
+        self.start(commands, identity_request=request)
+        environment = self.guest.guest.record | {
+            "server": identity,
+            "feature_port_candidates": list(feature_ports),
+        }
         if self.identities:
             environment["auxiliary_tools"] = deepcopy(self.identities)
         try:
+            readiness = self.identity_snapshot("readiness")
+            self.guest.guest.record["peer_identity_readiness"] = deepcopy(readiness)
+            if (
+                verify_peer_identity(self.identity_expected, readiness, readiness)[
+                    "verified"
+                ]
+                is not True
+            ):
+                raise PeerHealthError("peer executable identity failed at readiness")
             yield {
                 "node": node,
                 "source": self.guest.ipv4,
                 "environment": environment,
                 "guest": self.guest.guest,
+                "identityExpected": deepcopy(self.identity_expected),
+                "identityReadiness": readiness,
+                "_identityOwner": self,
             }
         finally:
             environment["server_cleanup"] = self.stop()
             if profile.backend == "wireguard":
+                cleanup = read_json(self.root / "peer/wg-joined.json")
+                environment["wireguard_backend_cleanup"] = cleanup
+                if cleanup.get("joined") is not True or cleanup.get(
+                    "exit_code"
+                ) not in (0, -2, -15):
+                    raise RuntimeError(
+                        "official WireGuard backend failed to join normally"
+                    )
                 witness = json.loads((self.root / "peer/wg-witness.json").read_text())
                 environment["wireguard"] = witness
                 if not all(value > 0 for value in witness.values()):
@@ -664,6 +823,7 @@ class PeerLab:
     def masque(self, profile):
         from .interop import masque_interop as native
 
+        validate_profile_ports(profile)
         if len(self.origins) != 2:
             raise ValueError("MASQUE pressure requires both owned origins")
         targets = {origin.ipv4: origin.ipv4 for origin in self.origins} | self.names
@@ -723,7 +883,8 @@ class PeerLab:
         return node, commands
 
     def custom(self, profile):
-        case = dict(
+        validate_profile_ports(profile)
+        case = deepcopy(
             {
                 "protocol": "vless",
                 "network": "xhttp",
@@ -909,7 +1070,15 @@ class PeerLab:
 
 
 @contextlib.contextmanager
-def lab(root, image, witnesses, origins, dns, *, kernel=None):
+def lab(
+    root,
+    image,
+    witnesses,
+    origins,
+    dns,
+    *,
+    kernel=None,
+):
     from .interop.masque_interop import module_cache
 
     directory = root / "pressure-peers"
@@ -917,7 +1086,11 @@ def lab(root, image, witnesses, origins, dns, *, kernel=None):
     materialize_input_directory(root / "artifacts", directory / "artifacts")
     pin = reference._certificate(directory)
     with LinuxGuest(
-        root, image, cache=module_cache(), role="protocol-peer", kernel=kernel
+        root,
+        image,
+        cache=module_cache(),
+        role="protocol-peer",
+        kernel=kernel,
     ) as guest:
         install_tools(guest, toolchain=False)
         guest.execute(
@@ -947,7 +1120,14 @@ def lab(root, image, witnesses, origins, dns, *, kernel=None):
         )
         with receive_buffer_profile(guest, directory) as buffers:
             guest.record["udp_receive_buffer"] = buffers
-            owner = PeerLab(directory, guest, pin, dns, origins=origins, names=names)
+            owner = PeerLab(
+                directory,
+                guest,
+                pin,
+                dns,
+                origins=origins,
+                names=names,
+            )
             try:
                 yield owner
             finally:
@@ -1042,6 +1222,70 @@ def quiet_mihomo_controller():
     with urllib.request.urlopen(request, timeout=5) as response:
         if response.status != 204 or len(response.read(1025)) > 1024:
             raise RuntimeError("owned Mihomo log-level update was rejected")
+
+
+def _request_caddy_dependency_stop(definitions, processes):
+    """Signal only the exact owned Caddy/Xray group before any LIFO wait.
+
+    Called as an ExitStack callback, after the monitoring loop has ended.
+    The caller still owns each existing __exit__, deadline and output join.
+    """
+    expected = (
+        (
+            None,
+            [
+                "openssl",
+                "s_server",
+                "-accept",
+                "0.0.0.0:24501",
+                "-cert",
+                "/work/peer/cert.pem",
+                "-key",
+                "/work/peer/key.pem",
+                "-tls1_3",
+                "-alpn",
+                "h2,http/1.1",
+                "-www",
+                "-quiet",
+            ],
+        ),
+        (
+            "xray-handler",
+            [
+                "env",
+                "XRAY_BUF_SPLICE=disable",
+                "/work/artifacts/xray",
+                "run",
+                "-c",
+                "/work/peer/caddy-xray.json",
+            ],
+        ),
+        (
+            "caddy-gateway",
+            ["/work/artifacts/caddy", "run", "--config", "/work/peer/caddy.json"],
+        ),
+    )
+    if len(definitions) != len(expected) or len(processes) != len(expected):
+        return False
+    if any(
+        definition.get("name") != name
+        or definition.get("argv") != command
+        or definition.get("ss_plugin_namespace")
+        for definition, (name, command) in zip(definitions, expected, strict=True)
+    ):
+        return False
+    first_error = None
+    for index in (2, 1):
+        try:
+            processes[index].request_stop()
+        except BaseException as error:
+            # One failed signal must not prevent the other dependency
+            # from being requested to stop before ExitStack joins owners.
+            if first_error is None:
+                first_error = error
+    if first_error is not None:
+        raise first_error
+    return True
 
 
 def _serve(root):
@@ -1146,6 +1390,9 @@ def _serve(root):
                     )
                 if definition.get("quiet_after_ready"):
                     quiet_mihomo_controller()
+            # Last callback runs first: request both dependency stops before
+            # Caddy's existing __exit__ can wait for the still-live Xray handler.
+            stack.callback(_request_caddy_dependency_stop, definitions, processes)
             save(root / "peer/owner.json", owner)
             (root / "peer/ready").touch()
             while not stop.wait(0.1):
@@ -1196,10 +1443,33 @@ def _health(root):
     print(json.dumps(snapshot(root)))
 
 
+def _freeze_identity(root):
+    from .pressure_peer_health import prelaunch_identity
+
+    print(json.dumps(prelaunch_identity(root)))
+
+
+def _identity(root, scope):
+    from .pressure_peer_health import identity_snapshot
+
+    print(json.dumps(identity_snapshot(root, scope)))
+
+
 if __name__ == "__main__":
     if sys.platform != "linux" or os.environ.get("VOLE_INTEROP_ISOLATED") != "1":
         raise SystemExit("owned Linux protocol peer required")
-    action, directory = sys.argv[1:]
-    {"--start": _start, "--serve": _serve, "--stop": _stop, "--health": _health}[
-        action
-    ](Path(directory))
+    action, directory, *arguments = sys.argv[1:]
+    if action == "--identity":
+        if len(arguments) != 1:
+            raise SystemExit("one exact identity observation scope required")
+        _identity(Path(directory), json.loads(arguments[0]))
+    else:
+        if arguments:
+            raise SystemExit("unexpected owned peer arguments")
+        {
+            "--start": _start,
+            "--serve": _serve,
+            "--stop": _stop,
+            "--health": _health,
+            "--freeze-identity": _freeze_identity,
+        }[action](Path(directory))

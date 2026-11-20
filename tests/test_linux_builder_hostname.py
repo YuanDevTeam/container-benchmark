@@ -17,9 +17,6 @@ class LinuxGuestHostnameTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         root = Path(temporary.name)
-        for tool in ("rustc", "cargo"):
-            (root / "rust/bin").mkdir(parents=True, exist_ok=True)
-            (root / "rust/bin" / tool).touch()
         self.hostname = "random-container-name"
         self.readback = None
         self.setter_error = None
@@ -30,6 +27,9 @@ class LinuxGuestHostnameTests(unittest.TestCase):
         self.guest = SimpleNamespace(
             root=root, log_dir=root, record={}, execute=self.execute
         )
+        verifier = patch("container_benchmark.prepared_image.verify_prepared_guest")
+        self.verify_image = verifier.start()
+        self.addCleanup(verifier.stop)
 
     def set_hostname(self, value):
         if self.setter_error is not None:
@@ -60,9 +60,12 @@ class LinuxGuestHostnameTests(unittest.TestCase):
                 self.assertEqual(self.guest.record["hostname"], "benchmark")
                 self.assertEqual(self.guest.record["cpus"], 5)
                 self.assertEqual(self.guest.record["memory_bytes"], memory_bytes)
-                self.assertIn("--no-download", self.commands[0][2])
-                self.assertEqual(self.commands[1][:3], ["python3", "-B", "-c"])
-                self.assertEqual(self.commands[1][4:], ["benchmark"])
+                self.verify_image.assert_called_with(
+                    self.guest, self.guest.log_dir / "prepared-image-check.log"
+                )
+                self.assertEqual(self.commands[0][:3], ["python3", "-B", "-c"])
+                self.assertEqual(self.commands[0][4:], ["benchmark"])
+                self.assertFalse(any("apt-get" in str(cmd) for cmd in self.commands))
 
     def test_wrong_readback_is_rejected_without_recording_requested_value(self):
         self.readback = "still-random"

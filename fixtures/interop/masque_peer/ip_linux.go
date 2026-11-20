@@ -318,6 +318,12 @@ func (p *peer) forwardIP(parent context.Context, tun *ipTunnel, conn packetConne
 	go func() {
 		defer workers.Done()
 		defer func() { finished <- struct{}{} }()
+		if h2, ok := conn.(*h2Packets); ok {
+			// Only the actual H2 response owner batches. H3 keeps its original
+			// library datagram/feedback loop below, including packet statistics.
+			_ = p.forwardH2Output(ctx, tun.file, h2)
+			return
+		}
 		packet := make([]byte, 65536)
 		for {
 			n, err := tun.file.Read(packet)

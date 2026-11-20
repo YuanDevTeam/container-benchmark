@@ -13,10 +13,12 @@ from . import container_backend
 
 REGISTRY = ".owned-resources.json"
 PURPOSE = "proxy-core-benchmark"
-IMAGE = re.compile(
+OFFICIAL_IMAGE = re.compile(
     r"docker\.io/library/ubuntu"
     r"(?::[A-Za-z0-9][A-Za-z0-9_.-]{0,127}|@sha256:[0-9a-f]{64})"
 )
+PREPARED_IMAGE = re.compile(r"localhost/vole-benchmark/ubuntu:[0-9a-f]{64}")
+IMAGE = re.compile("(?:" + OFFICIAL_IMAGE.pattern + "|" + PREPARED_IMAGE.pattern + ")")
 CONTAINER = re.compile(r"benchmark-[0-9a-f]{12}-[A-Za-z0-9._-]+")
 
 
@@ -103,7 +105,7 @@ def image_acquisition(ref):
         yield
         return
     if IMAGE.fullmatch(ref) is None:
-        raise ValueError("only exact official test-image references can be owned")
+        raise ValueError("only exact official or prepared test images can be owned")
     existing = _images()
     with _registry(work) as record:
         record["images"].setdefault(
@@ -131,7 +133,7 @@ def run_image(arguments):
 def share_image(ref):
     """Retain an exact successfully verified shared download, not its containers."""
     if IMAGE.fullmatch(ref) is None:
-        raise ValueError("only exact official test-image references can be shared")
+        raise ValueError("only exact official or prepared test images can be shared")
     work = _work()
     if work is None:
         return

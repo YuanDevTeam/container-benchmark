@@ -22,9 +22,9 @@ uv run --locked container-benchmark self-test
 
 ## 容器合同
 
-两后端使用同一官方 `docker.io/library/ubuntu:26.04` 标签，按实际架构冻结 digest，并读回 Ubuntu 身份、容器资源和内核版本。专用编译容器保持 5 CPU／16 GiB；客户端、协议对端、原站和负载容器使用 5 CPU／4 GiB。编译完成并清理 builder 后才启动负载。
+编译与测试统一使用从最新官方 Ubuntu LTS（当前 `docker.io/library/ubuntu:26.04`）制作的[共享依赖镜像](prepared-image.md)，按实际架构冻结基础和派生镜像身份，并读回 Ubuntu 身份、容器资源和内核版本。依赖变动时重建镜像，运行容器不逐次安装包。专用编译容器保持 5 CPU／16 GiB；客户端、协议对端、原站和负载容器使用 5 CPU／4 GiB。编译完成并清理 builder 后才启动负载。
 
-Windows 使用带工程标签的独立 bridge NAT 网络，核验 IP masquerade 与 MTU 1500。容器不发布宿主端口；Controller 仍只用于管理。创建、检查、执行和清理均通过 `wslc`，清理前后按精确名称与所有权标签核对，保留既有容器、网络、映像及宿主 VPN、路由、DNS 和防火墙。
+Windows 使用带工程标签的独立 bridge NAT 网络，核验 IP masquerade 与 MTU 1500。Controller 仍只用于管理。创建、检查、执行和清理均通过 `wslc`，清理前后按精确名称与所有权标签核对，保留既有容器、网络、映像及宿主 VPN、路由、DNS 和防火墙。
 
 `wslc` 的列表 JSON 与 Apple `container` 不同：列表可能为逐行 JSON，完整 inspect 为数组；后端统一解释名称、标签、状态、IP、CPU 和内存。资源限制必须按实际 inspect 回读，不能把请求值当作实际分配。
 
@@ -40,8 +40,10 @@ WSLC 的 IPv4 bridge 默认可能令容器的 `net.ipv6.conf.all.disable_ipv6` �
 
 ## 内核与结果边界
 
-`wslc` 使用 WSL session 的实际内核。逐容器记录 `uname -r`；`--peer-kernel` 的逐容器自选 Image 在此后端不可用，传入时明确拒绝。工程不自动修改 WSL 全局内核、session 设置或系统网络。
+全部自有容器的共同前提是最新维护中的 **7.3 stable** 内核、MPTCP enabled=1，以及匹配且可信的 TCP Brutal 2.0.1 已加载并注册。普通 socket 的默认算法保持 BBR；所选场景另验实际 MPTCP 协商或 Brutal socket。
 
-Apple ARM64 的 `7.3.0-vole-kata430` 与签名 TCP Brutal 模块只适用于[原环境](kernel-environment.md)。Windows 的 MPTCP、Brutal、IPv6 和内核行为须分别验证，缺失能力保留为未执行或明确错误，不能引用旧 Apple 容器结果。Windows 编排下的 Linux CLI 测量也不代签 Vole Windows VPN／Wintun 或物理设备验收。
+`wslc` 使用 WSL session 的实际内核，不能像 Apple `container` 一样逐 VM 选择 Image。当前共享内核入口在 Windows 上明确拒绝执行；须先实现并验证对应架构的 WSL session 前检及匹配模块交付，才可恢复编译／测试。离线 `--list` 和 self-test 继续可用。工程不自动修改 WSL 全局内核、session 设置或系统网络，也不回落旧内核继续运行。
+
+Apple ARM64 的 `7.3.1-vole-kata430` 与签名 TCP Brutal 模块只适用于对应的[内核环境](kernel-environment.md)，不能为 Windows 代签。Windows 的 MPTCP、Brutal、IPv6 和内核行为须分别验证；Windows 编排下的 Linux CLI 测量也不代签 Vole Windows VPN／Wintun 或物理设备验收。
 
 新后端的运行保留实际源码、架构、映像、内核和负载身份。旧账本不会因切换到 Windows 自动重新执行；验证受影响旧 PASS 时显式使用 `--retest-passed`，历史结果保持原输入。

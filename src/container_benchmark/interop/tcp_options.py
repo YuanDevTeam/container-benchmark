@@ -42,6 +42,10 @@ PEERS = {
 PAYLOAD = bytes(range(256)) * 4
 SECONDARY_PEER = "10.209.0.2"
 UDP_TARGET_PORTS = (24500, 24506, 24507)
+MODULE_ABSENCE_REASON = (
+    "The required shared kernel baseline keeps TCP Brutal loaded in every guest; "
+    "a local-module-absent fallback cannot be exercised without violating it."
+)
 
 
 def cases():
@@ -82,12 +86,15 @@ def cases():
             "peer": "brutal",
             "expected": "tcp",
             "mux": "h2mux",
+            "local_module": False,
+            "requires_module_absent": True,
         },
         {
             "id": "brutal-h2mux-server-disabled",
             "peer": "disabled",
             "expected": "rejected",
             "mux": "h2mux",
+            "local_module": True,
         },
         *[
             {
@@ -110,6 +117,20 @@ def selection(requested):
     if set(wanted) - {case["id"] for case in cases()}:
         raise ValueError("unknown TCP option case")
     return [case for case in cases() if case["id"] in wanted]
+
+
+def applicability(case):
+    if case.get("requires_module_absent"):
+        return {
+            "id": case["id"],
+            "status": "NOT_APPLICABLE",
+            "reason": MODULE_ABSENCE_REASON,
+        }
+    return {"id": case["id"], "status": "APPLICABLE"}
+
+
+def applicable_cases(selected):
+    return [row for row in selected if applicability(row)["status"] == "APPLICABLE"]
 
 
 def configuration(case, peer, pin):
@@ -297,7 +318,7 @@ def isolated():
         for name in ("BENCHMARK_ISOLATED", "VOLE_INTEROP_ISOLATED")
     ):
         raise RuntimeError("owned isolated Linux TCP option guest required")
-    if os.uname().release != options.KERNEL:
+    if os.uname().release != options.kernel_release():
         raise RuntimeError("TCP option consumer requires the verified test kernel")
 
 
@@ -562,16 +583,14 @@ def disabled_peer(probe, tun, origin):
 
 def guest(root, group):
     isolated()
+    if group != "present":
+        raise ValueError("TCP option guests retain the shared loaded Brutal baseline")
     fixture = bounded_json(root / "tcp-options-fixture.json")
-    selected = [
-        row
-        for row in selection(fixture["cases"])
-        if bool(row.get("local_module")) == (group == "present")
-    ]
+    selected = applicable_cases(selection(fixture["cases"]))
     if not selected:
         raise ValueError("empty TCP option execution group")
-    if Path("/sys/module/brutal").exists() != (group == "present"):
-        raise ValueError("actual client module state differs from requested group")
+    if not Path("/sys/module/brutal").exists():
+        raise ValueError("actual client module state violates the shared baseline")
     probe = reference._load_probe()
     native = fixture.get("entrypoint") == "ffi"
     runtime = None
@@ -967,7 +986,32 @@ def run(source, binary, output, requested=None, *, library=None):
     from ..linux_builder import LinuxGuest
     from .mihomo_lab import install_tools
 
-    selected = selection(requested)
+    requested_cases = selection(requested)
+    selected = applicable_cases(requested_cases)
+    native = library is not None
+    report = {
+        "status": "ERROR",
+        "scope": (
+            ("native ABI" if native else "ordinary CLI")
+            + " real TUN; no pressure or platform/device acceptance"
+        ),
+        "entrypoint": "ffi" if native else "cli",
+        "requested_cases": [row["id"] for row in requested_cases],
+        "not_applicable_cases": [
+            applicability(row)
+            for row in requested_cases
+            if applicability(row)["status"] == "NOT_APPLICABLE"
+        ],
+    }
+    if not selected:
+        report.update(
+            status="NOT_APPLICABLE",
+            scope="selection is incompatible with the required shared kernel baseline",
+            results=[],
+            network_executed=False,
+        )
+        save(output, report)
+        return report
     if architecture() != "arm64":
         raise RuntimeError(
             "TCP option fixtures require the verified ARM64 guest kernel and module"
@@ -980,16 +1024,6 @@ def run(source, binary, output, requested=None, *, library=None):
         or int.from_bytes(header[18:20], "little") != elf_machine()
     ):
         raise ValueError("TCP option consumers require a native Linux CLI or library")
-    native = library is not None
-    report = {
-        "status": "ERROR",
-        "scope": (
-            ("native ABI" if native else "ordinary CLI")
-            + " real TUN; no pressure or platform/device acceptance"
-        ),
-        "entrypoint": "ffi" if native else "cli",
-        "requested_cases": [row["id"] for row in selected],
-    }
     with Session(source) as session:
         root = session.work
         peer_started = False
@@ -1027,7 +1061,7 @@ def run(source, binary, output, requested=None, *, library=None):
                         "peer": peer_guest.ipv4,
                         "consumer": consumer.ipv4,
                         "pin": pin,
-                        "cases": report["requested_cases"],
+                        "cases": [row["id"] for row in selected],
                         "entrypoint": report["entrypoint"],
                     },
                 )
@@ -1073,22 +1107,15 @@ def run(source, binary, output, requested=None, *, library=None):
                         wait_for(
                             (root / "tcp-options-peer-ready.json").is_file, seconds=30
                         )
-                        for present in (False, True):
-                            if not any(
-                                bool(row.get("local_module")) == present
-                                for row in selected
-                            ):
-                                continue
-                            group = "present" if present else "absent"
-                            with options.module_context(
-                                consumer, enabled=present, label="functional-" + group
-                            ) as local:
-                                report["consumer_module_" + group] = local
-                                consumer.execute(
-                                    [*prefix, "guest", "/work", group],
-                                    root / (group + "-probe.log"),
-                                    timeout=180,
-                                )
+                        with options.module_context(
+                            consumer, label="functional-shared"
+                        ) as local:
+                            report["consumer_module_present"] = local
+                            consumer.execute(
+                                [*prefix, "guest", "/work", "present"],
+                                root / "present-probe.log",
+                                timeout=180,
+                            )
                     finally:
                         (root / "tcp-options-peer-stop").touch()
                         wait_for(
@@ -1104,7 +1131,9 @@ def run(source, binary, output, requested=None, *, library=None):
                     raise RuntimeError(
                         "Core source changed during TCP option validation"
                     )
-            report["status"] = session.status = "PASS"
+            report["status"] = session.status = (
+                "PARTIAL" if report["not_applicable_cases"] else "PASS"
+            )
         except Exception as error:
             report["failure"] = {"kind": type(error).__name__}
             raise
@@ -1135,7 +1164,15 @@ def main(argv=None):
     args = parser.parse_args(arguments)
     if args.list:
         for row in cases():
-            print(row["id"])
+            available = applicability(row)
+            print(
+                row["id"]
+                + (
+                    "\tNOT_APPLICABLE: " + available["reason"]
+                    if available["status"] == "NOT_APPLICABLE"
+                    else ""
+                )
+            )
         return
     if (
         args.source is None

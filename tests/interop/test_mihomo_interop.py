@@ -269,16 +269,25 @@ class InteropTests(unittest.TestCase):
             interop._safe_reason(ValueError("password=do-not-print")), "ValueError"
         )
 
-    def test_offline_apt_install_uses_the_actual_deb_cache_path(self):
+    def test_tools_verify_the_prepared_image_without_installing_packages(self):
         guest = SimpleNamespace(root=Path("/owned"), name="fake", execute=Mock())
-        lab.install_tools(guest)
-        command = guest.execute.call_args.args[0]
-        self.assertIn("-o Dir::Cache::archives=/work/builder-tools", command[2])
-        self.assertIn("--no-download", command[2])
+        with patch.object(lab, "verify_prepared_guest") as verified:
+            lab.install_tools(guest)
+        verified.assert_called_once_with(guest, Path("/owned/fake-tools-preflight.log"))
+        guest.execute.assert_not_called()
         self.assertEqual(
             interop._safe_reason(ValueError("UDP origin source differs")),
             "UDP origin source differs",
         )
+
+    def test_prepared_rust_target_must_match_before_a_builder_executes_it(self):
+        guest = SimpleNamespace(root=Path("/owned"), name="fake", execute=Mock())
+        with (
+            patch.object(lab, "verify_prepared_guest"),
+            self.assertRaisesRegex(ValueError, "native target"),
+        ):
+            lab.install_tools(guest, rust={"target": "other-linux-target"})
+        guest.execute.assert_not_called()
 
     def test_interop_packages_satisfy_the_shared_peer_builder_preflight(self):
         from container_benchmark.linux_builder import PACKAGES

@@ -21,7 +21,8 @@ def materialize_input_directory(source: Path, destination: Path) -> None:
         shutil.copytree(source, destination, copy_function=shutil.copyfile)
     else:
         destination.symlink_to(
-            Path(os.path.relpath(source, destination.parent)), target_is_directory=True
+            Path(os.path.relpath(source, destination.parent.resolve(strict=True))),
+            target_is_directory=True,
         )
 
 

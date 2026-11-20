@@ -93,7 +93,8 @@ class ServerSelectionTests(unittest.TestCase):
         self.assertTrue(caddy["frontends"])
 
     def test_direct_factories_and_both_schedulers_reject_before_side_effects(self):
-        invalid = replace(catalogue()["vless-tcp-plain"], backend="xray")
+        profile = catalogue()["vless-tcp-plain"]
+        invalid = replace(profile, backend="xray", case=profile.case | {"port": 24500})
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             guest = SimpleNamespace(ipv4="192.0.2.4", execute=Mock())

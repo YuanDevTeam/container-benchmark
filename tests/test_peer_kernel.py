@@ -1,4 +1,4 @@
-"""Explicit peer-only kernel plumbing; all container operations are mocked."""
+"""Universal kernel plumbing and explicit-image identity; managers are mocked."""
 
 import contextlib
 import hashlib
@@ -10,7 +10,13 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, patch
 
-from container_benchmark import core_comparison, linux_builder, pressure_peers, workload
+from container_benchmark import (
+    core_comparison,
+    kernel_environment,
+    linux_builder,
+    pressure_peers,
+    workload,
+)
 from container_benchmark import guest_architecture as arch
 from container_benchmark import pressure_campaign as campaign
 
@@ -107,6 +113,27 @@ class PeerKernelTests(unittest.TestCase):
 
     def guest_context(self, command):
         peer = SimpleNamespace(name="owned-peer", record={}, stop=Mock())
+        binding = {
+            "paths": {"image": self.kernel},
+            "frozen": {
+                "expectedRelease": "7.3.1-vole-kata430",
+                "artifacts": {
+                    "image": {
+                        "bytes": self.kernel.stat().st_size,
+                        "sha256": hashlib.sha256(self.kernel.read_bytes()).hexdigest(),
+                    }
+                },
+            },
+        }
+        self.enterContext(
+            patch.object(
+                kernel_environment, "prepare_guest_kernel", return_value=binding
+            )
+        )
+        self.enterContext(patch.object(kernel_environment, "verify_guest_kernel"))
+        self.enterContext(
+            patch("container_benchmark.prepared_image.verify_prepared_guest")
+        )
         self.enterContext(patch.object(linux_builder, "BENCHMARK_ROOT", self.root))
         self.enterContext(
             patch.object(linux_builder, "ContainerPeer", return_value=peer)
@@ -114,7 +141,7 @@ class PeerKernelTests(unittest.TestCase):
         self.enterContext(patch.object(linux_builder, "command", side_effect=command))
         return peer
 
-    def test_explicit_kernel_is_peer_only_and_records_actual_release_and_bytes(self):
+    def test_explicit_matching_kernel_records_actual_release_and_bytes(self):
         calls, command = self.guest_commands()
         peer = self.guest_context(command)
         with linux_builder.LinuxGuest(
@@ -134,15 +161,23 @@ class PeerKernelTests(unittest.TestCase):
                 },
             )
         run = calls[0]
-        self.assertEqual(run[run.index("--kernel") + 1], str(self.kernel.resolve()))
+        self.assertEqual(
+            Path(run[run.index("--kernel") + 1]).resolve(), self.kernel.resolve()
+        )
         self.assertEqual(peer.stop.call_count, 1)
+        # The optional operand must agree with the universal baseline for every role.
+        other = self.root / "other-kernel"
+        other.write_bytes(b"a different custom kernel")
         for role in ("core", "builder", "origin"):
-            with self.assertRaisesRegex(ValueError, "protocol-peer"):
+            with (
+                self.assertRaisesRegex(ValueError, "shared stable baseline"),
                 linux_builder.LinuxGuest(
-                    self.root / role, "ubuntu", role=role, kernel=self.kernel
-                )
+                    self.root / role, "ubuntu", role=role, kernel=other
+                ),
+            ):
+                self.fail("an override cannot bypass the common kernel")
 
-    def test_default_guest_records_release_without_a_kernel_override(self):
+    def test_default_guest_explicitly_selects_the_shared_kernel(self):
         calls, command = self.guest_commands()
         self.guest_context(command)
         with linux_builder.LinuxGuest(
@@ -151,8 +186,9 @@ class PeerKernelTests(unittest.TestCase):
             self.assertEqual(guest.record["kernel_release"], "7.3.0-test")
             self.assertEqual(guest.record["architecture"], arch.architecture())
             self.assertEqual(guest.record["machine"], arch.machine_name())
-            self.assertNotIn("kernel", guest.record)
-        self.assertNotIn("--kernel", calls[0])
+            self.assertIn("kernel", guest.record)
+        self.assertIn("--kernel", calls[0])
+        self.assertIn("BENCHMARK_KERNEL_RELEASE=7.3.1-vole-kata430", calls[0])
         self.assertEqual(sum("/bin/uname" in call for call in calls), 2)
 
     def test_wrong_guest_machine_closes_before_admitting_the_owned_guest(self):
@@ -166,6 +202,77 @@ class PeerKernelTests(unittest.TestCase):
         ):
             self.fail("a non-native guest was admitted")
         peer.stop.assert_called_once()
+
+    def test_every_runtime_and_builder_role_runs_the_same_preflight_before_yield(self):
+        calls, observed = self.guest_commands(uname="7.3.1-vole-kata430")
+        role = "core"
+
+        def command(action, *arguments, **kwargs):
+            result = observed(action, *arguments, **kwargs)
+            if action == "inspect":
+                state = json.loads(result)
+                state[0]["configuration"]["resources"]["memoryInBytes"] = (
+                    linux_builder.allocation(role)[1]
+                )
+                return json.dumps(state)
+            return result
+
+        self.guest_context(command)
+        with (
+            patch.object(kernel_environment, "verify_guest_kernel") as checked,
+            patch(
+                "container_benchmark.prepared_image.verify_prepared_guest"
+            ) as image_checked,
+        ):
+            for index, role in enumerate(
+                (
+                    "core",
+                    "origin",
+                    "protocol-peer",
+                    "apple-origin",
+                    "builder",
+                    "helper-builder",
+                    "packages",
+                    "image-builder",
+                )
+            ):
+                with self.subTest(role=role):
+                    image = (
+                        "docker.io/library/ubuntu@sha256:" + "a" * 64
+                        if role == "image-builder"
+                        else "prepared-synthetic-image"
+                    )
+                    with linux_builder.LinuxGuest(
+                        self.root / role, image, network="default", role=role
+                    ):
+                        self.assertEqual(checked.call_count, index + 1)
+                        self.assertEqual(
+                            image_checked.call_count,
+                            index if role == "image-builder" else index + 1,
+                        )
+            runs = [call for call in calls if call[0] == "run"]
+            self.assertEqual(len(runs), 8)
+            for run in runs:
+                self.assertIn("--kernel", run)
+                self.assertTrue(
+                    any("/opt/benchmark-kernel,readonly" in str(arg) for arg in run)
+                )
+
+    def test_failed_kernel_policy_stops_before_any_guest_or_network_command(self):
+        calls, command = self.guest_commands()
+        peer = self.guest_context(command)
+        with (
+            patch.object(
+                kernel_environment,
+                "prepare_guest_kernel",
+                side_effect=ValueError("stale stable kernel"),
+            ),
+            self.assertRaisesRegex(ValueError, "stale stable"),
+            linux_builder.LinuxGuest(self.root / "stale", "ubuntu"),
+        ):
+            self.fail("a stale profile cannot acquire a VM")
+        self.assertEqual(calls, [])
+        peer.stop.assert_not_called()
 
     def test_windows_runtime_prepares_tun_namespace_but_builders_and_packages_do_not(
         self,

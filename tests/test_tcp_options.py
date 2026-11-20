@@ -87,10 +87,18 @@ class TcpOptionsTests(unittest.TestCase):
                         )
                     )
 
-                guest = SimpleNamespace(root=root, record={}, execute=execute)
+                guest = SimpleNamespace(
+                    root=root,
+                    record={
+                        "kernelPreflight": {"status": "PASS"},
+                        "kernelEnvironment": {
+                            "artifacts": {"module": {"sha256": "frozen"}}
+                        },
+                    },
+                    execute=execute,
+                )
                 with (
                     patch.object(tcp_options, "architecture", return_value="arm64"),
-                    patch.object(tcp_options, "sha256", return_value="frozen"),
                 ):
                     if enabled:
                         with (
@@ -113,9 +121,13 @@ class TcpOptionsTests(unittest.TestCase):
                 "uname",
                 return_value=SimpleNamespace(
                     machine="aarch64",
-                    release=tcp_options.KERNEL,
+                    release="7.3.1-vole-kata430",
                 ),
                 create=True,
+            ),
+            patch.dict(
+                tcp_options.os.environ,
+                {"BENCHMARK_KERNEL_RELEASE": "7.3.1-vole-kata430"},
             ),
             patch.object(
                 tcp_options, "module_identity", return_value={"sha256": "frozen"}
@@ -146,6 +158,47 @@ class TcpOptionsTests(unittest.TestCase):
             },
         )
         self.assertNotIn("socket_readback", state)
+
+    def test_shared_baseline_module_is_borrowed_and_never_unloaded_by_a_case(self):
+        with (
+            patch.object(tcp_options, "isolated"),
+            patch.object(Path, "resolve", lambda path: path),
+            patch.dict(
+                tcp_options.os.environ,
+                {"BENCHMARK_KERNEL_RELEASE": "7.3.1-vole-kata430"},
+            ),
+            patch.object(
+                tcp_options.os,
+                "uname",
+                return_value=SimpleNamespace(
+                    machine="aarch64", release="7.3.1-vole-kata430"
+                ),
+                create=True,
+            ),
+            patch.object(
+                tcp_options, "module_identity", return_value={"sha256": "frozen"}
+            ),
+            patch.object(Path, "exists", return_value=True),
+            patch.object(
+                Path, "read_text", side_effect=["bbr\n", "reno bbr brutal\n", "bbr\n"]
+            ),
+            patch.object(tcp_options, "syscall") as syscall,
+            patch.object(tcp_options, "save") as save,
+        ):
+            tcp_options.module_action("load", "/run/benchmark/borrowed.json", "frozen")
+            borrowed = save.call_args.args[1]
+            self.assertFalse(borrowed["loaded_by_fixture"])
+            with patch.object(Path, "read_text", return_value=json.dumps(borrowed)):
+                tcp_options.module_action("unload", "/run/benchmark/borrowed.json")
+        syscall.assert_not_called()
+        self.assertEqual(save.call_args.args[1]["cleanup"], "PASS")
+
+    def test_missing_frozen_kernel_release_cannot_fall_back_to_an_old_constant(self):
+        with (
+            patch.dict(tcp_options.os.environ, {"BENCHMARK_KERNEL_RELEASE": ""}),
+            self.assertRaisesRegex(RuntimeError, "frozen shared stable"),
+        ):
+            tcp_options.kernel_release()
 
     def test_evidence_does_not_accept_request_bits_or_fallback_as_mptcp(self):
         fallback = {"protocol": 262, "negotiated": False, "fallback": True}

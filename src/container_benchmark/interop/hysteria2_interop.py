@@ -9,6 +9,8 @@ import subprocess
 from copy import deepcopy
 from pathlib import Path
 
+from ..port_budget import bounded_ports, validate_case_ports
+
 PASSWORD = "synthetic-hysteria2-interop-password"
 OBFS_PASSWORD = "synthetic-hysteria2-obfs-password"
 
@@ -60,10 +62,44 @@ def preferred_cases(protocols):
     return result
 
 
+def fixture_ports(case):
+    """Validate the complete candidates while retaining the declared HY2 fixture.
+
+    Shared batches relocate the scalar primary port before this factory resets
+    it to its frozen fixture value. Explicit multi-port declarations must still
+    describe that exact fixture, so none can be silently ignored or truncated.
+    """
+    definition = next(
+        (item for item in cases(["hysteria2"]) if item["id"] == case.get("id")),
+        None,
+    )
+    if definition is None or case.get("variant") != definition["variant"]:
+        raise ValueError("unknown official Hysteria2 fixture")
+    if "port" in case and (
+        type(case["port"]) is not int or not 1 <= case["port"] <= 65535
+    ):
+        raise ValueError("Hysteria2 primary port must be an integer within 1..65535")
+    if not definition["variant"].startswith("hop"):
+        return validate_case_ports(case)
+    first = definition["port"]
+    declared = bounded_ports(f"{first}-{first + 15}", require_hopping=True)
+    candidates = validate_case_ports(
+        {key: value for key, value in case.items() if key != "port"},
+        defaults=(f"{first}-{first + 15}",),
+        require_hopping=True,
+    )
+    if candidates != declared:
+        raise ValueError("Hysteria2 hopping candidates must match its declared fixture")
+    return candidates
+
+
 def configure_mihomo(
     selected, root, origin_ip, pin, guest, *, certificate_command=subprocess.run
 ):
     """Create authenticated positive/negative mTLS listeners for current checks."""
+    selected = tuple(selected)
+    for case in selected:
+        validate_case_ports(case)
     definitions = {
         case["id"]: case
         for case in preferred_cases(["hysteria2"])
@@ -160,6 +196,12 @@ def configure(
     selected, root, origin_ip, pin, guest, *, certificate_command=subprocess.run
 ):
     """Write transient official-server configurations, without starting services."""
+    # Validate the whole selection before directories, credentials or guest
+    # configuration are created, including a rejected later fixture in a batch.
+    selected = tuple(selected)
+    for case in selected:
+        if case.get("backend") == "hysteria2":
+            fixture_ports(case)
     root = Path(root)
     peer = str(ipaddress.IPv4Address(guest.ipv4))
     ipaddress.IPv4Address(origin_ip)
@@ -329,6 +371,7 @@ def _client_identity(root, command):
 
 
 def _hop_fixture(guest, case):
+    ports = fixture_ports(case)
     definition = next(
         (item for item in cases(["hysteria2"]) if item["id"] == case["id"]), None
     )
@@ -339,7 +382,6 @@ def _hop_fixture(guest, case):
     ):
         raise ValueError("Hysteria2 hop witness requires its declared fixture")
     directory = Path(guest.root) / "hysteria2" / definition["id"]
-    ports = range(definition["port"], definition["port"] + 16)
     return directory, f"vole_hy2_{definition['port']}", ports
 
 

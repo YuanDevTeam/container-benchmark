@@ -5,10 +5,12 @@ import shutil
 import tempfile
 import unittest
 from contextlib import contextmanager
+from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+from container_benchmark.mac_full_plan import manifest_for_profile
 from container_benchmark.pressure_catalog import Profile, catalogue, exclusions, select
 from container_benchmark.pressure_peers import PeerLab, origin_tso
 
@@ -282,6 +284,10 @@ class PressureProfileTests(unittest.TestCase):
 
     def test_ws4096_reuses_official_peer_and_preserves_real_early_data_ceiling(self):
         profile = catalogue()["vless-ws-plain-ed4096"]
+        original_case = deepcopy(profile.case)
+        original_manifests = {
+            mode: manifest_for_profile(profile, mode) for mode in ("js", "mixed")
+        }
         self.assertEqual(profile.modes, ("tcp",))
         self.assertIn("does not assert a filled 4 KiB", profile.note)
         with tempfile.TemporaryDirectory() as temporary:
@@ -307,6 +313,11 @@ class PressureProfileTests(unittest.TestCase):
                 node["ws-opts"]["early-data-header-name"], "Sec-WebSocket-Protocol"
             )
             self.assertNotIn("v2ray-http-upgrade", node["ws-opts"])
+            self.assertEqual(node["ws-opts"]["path"], "/pressure-ws/")
+            self.assertEqual(profile.case, original_case)
+            self.assertIsNot(node["ws-opts"], profile.case["node_overrides"]["ws-opts"])
+            for mode, original in original_manifests.items():
+                self.assertEqual(manifest_for_profile(profile, mode), original)
 
     def test_tcp_ech_does_not_inherit_h3_or_xhttp_configuration(self):
         from container_benchmark.interop import xray_interop
